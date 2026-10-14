@@ -1,0 +1,5 @@
+LIBRARY island_capsule
+EXPORTS
+    Island_Attach
+    Island_Detach
+    Island_Tick

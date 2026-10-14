@@ -1,0 +1,32 @@
+# Build
+build/
+out/
+bin/
+lib/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.cmake/
+
+# VS / VS Code
+.vs/
+*.user
+*.suo
+.vscode/ipch/
+.vscode/*.log
+
+# Misc
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

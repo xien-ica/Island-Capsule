@@ -1,0 +1,48 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CMake: Build",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build",
+        "--config",
+        "Debug"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$msCompile"],
+      "detail": "Build the whole project with CMake"
+    },
+    {
+      "label": "CMake: Configure",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "-S", "${workspaceFolder}",
+        "-B", "${workspaceFolder}/build",
+        "-G", "Visual Studio 18 2026",
+        "-A", "x64"
+      ],
+      "problemMatcher": [],
+      "detail": "Configure with Visual Studio 18 2026 (x64)"
+    },
+    {
+      "label": "CMake: Clean Rebuild",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "${workspaceFolder}/build",
+        "--config",
+        "Debug",
+        "--clean-first"
+      ],
+      "problemMatcher": ["$msCompile"]
+    }
+  ]
+}
