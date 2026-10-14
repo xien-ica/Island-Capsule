@@ -52,6 +52,11 @@ public:
   // %APPDATA%\IslandCapsule\lyrics
   static std::wstring CacheDir();
 
+  // Deletes every .txt / .tmp file in the lyrics folder (disk only). Safe to call from any thread;
+  // the in-memory LRU is left alone so the current session is not disrupted. Returns how many
+  // files were removed.
+  static int ClearDiskCache();
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

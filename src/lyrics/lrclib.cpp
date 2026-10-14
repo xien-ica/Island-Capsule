@@ -247,6 +247,23 @@ std::wstring LyricsFetcher::CacheDir() {
   return base.empty() ? L"lyrics" : base + L"\\lyrics";
 }
 
+int LyricsFetcher::ClearDiskCache() {
+  const std::wstring dir = CacheDir();
+  if (dir.empty()) return 0;
+  int removed = 0;
+  WIN32_FIND_DATAW fd{};
+  HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+  do {
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    const std::wstring name = fd.cFileName;
+    if (!EndsWith(name, L".txt") && !EndsWith(name, L".tmp")) continue;
+    if (DeleteFileW((dir + L"\\" + name).c_str())) ++removed;
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+  return removed;
+}
+
 struct LyricsFetcher::Impl {
   ChangedFn on_changed;
   std::thread worker;
