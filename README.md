@@ -2,10 +2,12 @@
 
 A small Dynamic Island–style media capsule for the **Windows 11 taskbar**.
 
+> Status: This project is still in active development. Expect changes, improvements, and occasional rough edges while features are being refined.
+
 It shows what’s currently playing, lets you control playback with hover or scroll, and can display **synced lyrics** right on the taskbar. It follows any media that appears in Windows’ System Media Transport Controls (Spotify, browsers, and most other media apps).
 
 > **Inspiration**  
-> The idea of putting a compact “island” media control on the Windows 11 taskbar comes from the excellent Windhawk mod [Island Media Controls](https://windhawk.net/mods/island-media-controls) by **usho**.  
+> The idea of putting a compact “island” media control on the Windows 11 taskbar comes from the excellent Windhawk mod [Island Media Controls](https://windhawk.net/mods/island-media-controls) by *[u/...]*.  
 > Island Capsule is a completely separate, from-scratch standalone application. It is **not** a Windhawk mod, does not share code with that project, and is not affiliated with it. If you prefer the native-taskbar integration approach, go try the original mod — it’s great.
 
 ## Features
