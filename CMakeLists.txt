@@ -11,7 +11,8 @@ endif()
 
 if(MSVC)
   # NOTE: no /await. C++/WinRT + C++20 uses the standard <coroutine>.
-  add_compile_options(/EHsc /W3 /permissive- /Zc:__cplusplus /utf-8)
+  # /FS serializes PDB writes so parallel cl.exe processes don't collide on vc145.pdb (error C1041).
+  add_compile_options(/EHsc /W3 /permissive- /Zc:__cplusplus /utf-8 /FS)
 endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -32,6 +33,7 @@ add_executable(island_loader
   src/lyrics/lyrics_text.cpp
   src/media/gsmtc.cpp
   src/ui/pill.cpp
+  src/ui/dwtext.cpp
   src/ui/transport.cpp
   src/ui/tray.cpp
   src/ui/settings_window.cpp
@@ -46,7 +48,7 @@ target_include_directories(island_loader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 target_compile_definitions(island_loader PRIVATE UNICODE _UNICODE)
 
 target_link_libraries(island_loader PRIVATE
-  user32 gdi32 shcore shell32 advapi32 ole32 msimg32 gdiplus dwmapi
+  user32 gdi32 shcore shell32 advapi32 ole32 msimg32 gdiplus dwmapi d2d1 dwrite
   windowsapp runtimeobject winhttp
 )
 
