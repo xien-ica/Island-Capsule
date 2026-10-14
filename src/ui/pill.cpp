@@ -23,6 +23,7 @@
 #include "lyrics/lrc.hpp"
 #include "theme/accent.hpp"
 #include "theme/brushes.hpp"
+#include "ui/dwtext.hpp"
 #include "ui/marquee.hpp"
 #include "ui/motion.hpp"
 #include "ui/pill.hpp"
@@ -34,6 +35,7 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shcore.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 namespace gp = Gdiplus;
 
@@ -44,16 +46,16 @@ namespace {
 constexpr wchar_t kClassName[] = L"IslandCapsulePill";
 
 // Logical (96-dpi) metrics
-constexpr double kPillH     = 36.0;
+constexpr double kPillH     = 42.0;
 constexpr double kMinW      = 120.0;
-constexpr double kArtSize   = 26.0;
+constexpr double kArtSize   = 32.0;
 constexpr double kPadLeft   = 10.0;  // generous left margin so the cover clears the round end
 constexpr double kGap       = 8.0;
 constexpr double kPadRight  = 16.0;   // right padding when the visualizer is off
 constexpr double kPadRightViz = 12.0; // right padding when the visualizer is on
 constexpr double kVizGap    = 8.0;    // text -> visualizer slot
-constexpr double kTitlePx   = 13.0;   // whole pixels render crisper than 12.5 / 10.5
-constexpr double kArtistPx  = 11.0;
+constexpr double kTitlePx   = 14.0;   // whole pixels render crisper than fractional sizes
+constexpr double kArtistPx  = 12.0;
 constexpr double kArtRadius = 6.5;
 constexpr double kFadeW     = 14.0;   // marquee edge fade
 constexpr double kHoverHold = 0.25;   // seconds the strip stays after the mouse leaves
@@ -137,6 +139,13 @@ bool TaskbarAbove(HWND self, HWND taskbar) {
   return false;
 }
 
+// One text hint for measuring AND drawing capsule text (title, artist, lyrics, volume HUD). The capsule is a
+// translucent layered surface, so ClearType is not an option; GridFit however snaps every glyph advance to whole
+// pixels, which with Segoe UI Variable gives uneven spacing ("mi nd") and soft stems. Plain grayscale AA keeps the
+// true advances. Switch to TextRenderingHintAntiAliasGridFit here to go back.
+constexpr gp::TextRenderingHint kCapsuleTextHint = gp::TextRenderingHintAntiAlias;
+constexpr UINT kCapsuleTextContrast = 6;   // 0..12 (default 4): higher = crisper, slightly bolder grayscale text
+
 struct Fonts {
   std::unique_ptr<gp::FontFamily> family;
   std::unique_ptr<gp::Font> title;
@@ -149,11 +158,21 @@ struct Fonts {
   float vol_reserve = -1.0f;                  // width of "100" in the title font (volume HUD)
   int vol_num_pct = -1;                       // last volume percent measured ...
   float vol_num_w = 0.0f;                     // ... and its width
-  float TitleH(gp::Graphics& g) { if (title_h < 0.0f) title_h = title->GetHeight(&g); return title_h; }
-  float ArtistH(gp::Graphics& g) { if (artist_h < 0.0f) artist_h = artist->GetHeight(&g); return artist_h; }
+  std::unique_ptr<DwText> dw;   // DirectWrite renderer; null => everything falls back to GDI+ text
 
-  explicit Fonts(double scale) {
-    family.reset(new gp::FontFamily(L"Segoe UI Variable Text"));
+  float TitleH(gp::Graphics& g) {
+    if (title_h < 0.0f) title_h = dw ? dw->LineHeight(false) : title->GetHeight(&g);
+    return title_h;
+  }
+  float ArtistH(gp::Graphics& g) {
+    if (artist_h < 0.0f) artist_h = dw ? dw->LineHeight(true) : artist->GetHeight(&g);
+    return artist_h;
+  }
+  float Width(gp::Graphics& g, const std::wstring& s, bool is_artist);   // defined after MeasureWidth
+
+  explicit Fonts(double scale, const std::wstring& family_name) {
+    family.reset(new gp::FontFamily(family_name.c_str()));
+    if (!family->IsAvailable()) family.reset(new gp::FontFamily(L"Segoe UI Variable Text"));
     if (!family->IsAvailable()) family.reset(new gp::FontFamily(L"Segoe UI"));
     if (!family->IsAvailable()) family.reset(gp::FontFamily::GenericSansSerif()->Clone());
     // Whole-pixel sizes: fractional sizes make GDI+ smear stems across pixel rows.
@@ -164,6 +183,9 @@ struct Fonts {
     fmt.reset(gp::StringFormat::GenericTypographic()->Clone());
     fmt->SetTrimming(gp::StringTrimmingNone);
     fmt->SetFormatFlags(gp::StringFormatFlagsNoWrap | gp::StringFormatFlagsNoClip);
+
+    dw = std::make_unique<DwText>();
+    if (!dw->Init(static_cast<float>(tpx), static_cast<float>(apx), family_name)) dw.reset();   // soft failure: GDI+ text
   }
 };
 
@@ -173,6 +195,11 @@ float MeasureWidth(gp::Graphics& g, const std::wstring& s, const gp::Font& f,
   gp::RectF box;
   g.MeasureString(s.c_str(), static_cast<INT>(s.size()), &f, gp::PointF(0, 0), &fmt, &box);
   return box.Width;
+}
+
+float Fonts::Width(gp::Graphics& g, const std::wstring& s, bool is_artist) {
+  if (dw) return dw->Width(s, is_artist);
+  return MeasureWidth(g, s, is_artist ? *artist : *title, *fmt);
 }
 
 inline uint32_t ScalePremul(uint32_t p, float f) {
@@ -343,6 +370,7 @@ struct PillWindow::Impl {
   Marquee title_mq, artist_mq;
   std::unique_ptr<Fonts> fonts;
   int fonts_dpi = 0;
+  std::wstring fonts_family;   // resolved family the current Fonts were built with
 
   // skip-direction text slide (Phase 5)
   std::wstring old_title, old_artist;
@@ -588,17 +616,19 @@ struct PillWindow::Impl {
     UpdateAccentSource(snap);
     UpdateArt(snap);
 
-    if (!fonts || fonts_dpi != dpi) {
-      fonts.reset(new Fonts(s));
+    const std::wstring want_family = ResolveFontFamily(cfg.font);
+    if (!fonts || fonts_dpi != dpi || fonts_family != want_family) {
+      fonts.reset(new Fonts(s, want_family));
       fonts_dpi = dpi;
+      fonts_family = want_family;
     }
 
     HDC sdc = GetDC(nullptr);
     if (sdc) {
       gp::Graphics g(sdc);
-      g.SetTextRenderingHint(gp::TextRenderingHintAntiAliasGridFit);
-      title_w = MeasureWidth(g, title_text, *fonts->title, *fonts->fmt);
-      artist_w = MeasureWidth(g, artist_text, *fonts->artist, *fonts->fmt);
+      g.SetTextRenderingHint(kCapsuleTextHint);
+      title_w = fonts->Width(g, title_text, false);
+      artist_w = fonts->Width(g, artist_text, true);
       ReleaseDC(nullptr, sdc);
     }
 
@@ -639,9 +669,9 @@ struct PillWindow::Impl {
       if (!measure_dc) measure_dc = CreateCompatibleDC(nullptr);
       if (!measure_dc) return 0.0f;
       measure_g = std::make_unique<gp::Graphics>(measure_dc);
-      measure_g->SetTextRenderingHint(gp::TextRenderingHintAntiAliasGridFit);
+      measure_g->SetTextRenderingHint(kCapsuleTextHint);
     }
-    const float w = MeasureWidth(*measure_g, str, *fonts->title, *fonts->fmt);
+    const float w = fonts->Width(*measure_g, str, false);
     if (lyr_wcache.size() > 512) lyr_wcache.clear();   // bounded: a few songs' worth
     lyr_wcache.emplace(str, w);
     return w;
@@ -979,23 +1009,65 @@ struct PillWindow::Impl {
     return t;
   }
 
+  // Alpha (0..255) applied to a cached DirectWrite run at draw time.
+  static void AlphaAttrs(gp::ImageAttributes& ia, float alpha255) {
+    const float a = (std::clamp)(alpha255 / 255.0f, 0.0f, 1.0f);
+    gp::ColorMatrix cm = {
+      1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 0.0f, a,    0.0f,
+      0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
+    ia.SetColorMatrix(&cm, gp::ColorMatrixFlagsDefault, gp::ColorAdjustTypeBitmap);
+  }
+
+  static int Ch(float v) { return static_cast<int>((std::clamp)(v, 0.0f, 255.0f) + 0.5f); }
+
+  // Draws `str` with DirectWrite (cached bitmap + DrawImage) at a whole-pixel origin. False => not available,
+  // the caller draws with GDI+ instead.
+  bool DrawDwRun(gp::Graphics& g, const std::wstring& str, bool is_artist, const Rgb& ink, float alpha255,
+                 float x, float y) {
+    if (!fonts || !fonts->dw || alpha255 <= 0.5f) return false;
+    const DwText::Run* run = fonts->dw->Get(str, is_artist, Ch(ink.r), Ch(ink.g), Ch(ink.b));
+    if (!run || !run->bmp) return false;
+    gp::ImageAttributes ia;
+    AlphaAttrs(ia, alpha255);
+    const gp::GraphicsState st = g.Save();
+    if (RootScale() == 1.0f) g.SetInterpolationMode(gp::InterpolationModeNearestNeighbor);   // exact 1:1 copy
+    g.DrawImage(run->bmp, gp::RectF(std::round(x), std::round(y), static_cast<float>(run->w), static_cast<float>(run->h)),
+                0.0f, 0.0f, static_cast<float>(run->w), static_cast<float>(run->h), gp::UnitPixel, &ia);
+    g.Restore(st);
+    return true;
+  }
+
   // One line of text. `x` is where the text starts (may be slid), `clip_x` the fixed
   // left edge of the text area. `mq` null => static (outgoing text during a slide).
   void DrawLine(gp::Graphics& g, const std::wstring& str, const gp::Font& font, const Rgb& ink,
                 float alpha, float x, float clip_x, float y, float avail, float line_h,
                 float text_w, bool overflow, const Marquee* mq) {
     if (str.empty() || avail <= 1.0f || alpha <= 0.5f) return;
-    gp::SolidBrush brush(Col(ink, alpha));
     // Whole-pixel origin: text drawn at a fractional position is resampled and looks blurry.
     x = std::round(x);
     y = std::round(y);
+
+    const bool is_artist = fonts && &font == fonts->artist.get();
+    const DwText::Run* run = (fonts && fonts->dw) ? fonts->dw->Get(str, is_artist, Ch(ink.r), Ch(ink.g), Ch(ink.b)) : nullptr;
+    gp::ImageAttributes ia;
+    if (run) AlphaAttrs(ia, alpha);
+    const bool exact = RootScale() == 1.0f;
 
     const gp::GraphicsState st = g.Save();
     g.SetClip(gp::RectF(clip_x, y, avail, line_h), gp::CombineModeIntersect);
 
     if (!overflow || !mq) {
-      g.DrawString(str.c_str(), -1, &font, gp::RectF(x, y, text_w + 4.0f, line_h),
-                   fonts->fmt.get(), &brush);
+      if (run) {
+        if (exact) g.SetInterpolationMode(gp::InterpolationModeNearestNeighbor);
+        g.DrawImage(run->bmp, gp::RectF(x, y, static_cast<float>(run->w), static_cast<float>(run->h)), 0.0f, 0.0f,
+                    static_cast<float>(run->w), static_cast<float>(run->h), gp::UnitPixel, &ia);
+      } else {
+        gp::SolidBrush brush(Col(ink, alpha));
+        g.DrawString(str.c_str(), -1, &font, gp::RectF(x, y, text_w + 4.0f, line_h), fonts->fmt.get(), &brush);
+      }
     } else {
       // Marquee: render into a persistent off-screen strip (re-created only when its size changes), fade the
       // edges, composite.
@@ -1011,14 +1083,23 @@ struct PillWindow::Impl {
       {
         // Graphics goes out of scope before ApplyEdgeFade locks the bits (same order as before).
         gp::Graphics tg(sc.bmp.get());
-        tg.SetTextRenderingHint(gp::TextRenderingHintAntiAliasGridFit);
+        tg.SetTextRenderingHint(kCapsuleTextHint);
+        tg.SetTextContrast(kCapsuleTextContrast);
         tg.Clear(gp::Color(0, 0, 0, 0));
         const float off = std::round(mq->Offset());
         const float loop = std::round(mq->Loop());
-        tg.DrawString(str.c_str(), -1, &font, gp::RectF(-off, 0.0f, text_w + 4.0f, static_cast<float>(th)),
-                      fonts->fmt.get(), &brush);
-        tg.DrawString(str.c_str(), -1, &font, gp::RectF(-off + loop, 0.0f, text_w + 4.0f, static_cast<float>(th)),
-                      fonts->fmt.get(), &brush);
+        if (run) {
+          tg.SetInterpolationMode(gp::InterpolationModeNearestNeighbor);
+          const float rw = static_cast<float>(run->w), rh = static_cast<float>(run->h);
+          tg.DrawImage(run->bmp, gp::RectF(-off, 0.0f, rw, rh), 0.0f, 0.0f, rw, rh, gp::UnitPixel, &ia);
+          tg.DrawImage(run->bmp, gp::RectF(-off + loop, 0.0f, rw, rh), 0.0f, 0.0f, rw, rh, gp::UnitPixel, &ia);
+        } else {
+          gp::SolidBrush brush(Col(ink, alpha));
+          tg.DrawString(str.c_str(), -1, &font, gp::RectF(-off, 0.0f, text_w + 4.0f, static_cast<float>(th)),
+                        fonts->fmt.get(), &brush);
+          tg.DrawString(str.c_str(), -1, &font, gp::RectF(-off + loop, 0.0f, text_w + 4.0f, static_cast<float>(th)),
+                        fonts->fmt.get(), &brush);
+        }
       }
       const int fade = static_cast<int>(std::lround(kFadeW * Scale()));
       const int left_fade = (std::min)(fade, static_cast<int>(std::round(mq->Offset())));
@@ -1157,7 +1238,7 @@ struct PillWindow::Impl {
   void DrawNudge(gp::Graphics& g, float tx, float avail, float H) {
     const float a = static_cast<float>(nudge_t) * static_cast<float>(lyr_mix);
     if (a <= 0.01f || nudge_str.empty() || !fonts) return;
-    if (nudge_w < 0.0f) nudge_w = MeasureWidth(g, nudge_str, *fonts->title, *fonts->fmt);
+    if (nudge_w < 0.0f) nudge_w = fonts->Width(g, nudge_str, false);
     const float th = fonts->TitleH(g);
     const float hud = 1.0f - static_cast<float>(vol_t);
     const float ty = std::round((H - th) / 2.0f);
@@ -1179,17 +1260,19 @@ struct PillWindow::Impl {
     const int pct = vol_muted ? 0 : static_cast<int>(std::lround((std::clamp)(vol_disp, 0.0f, 1.0f) * 100.0f));
     const std::wstring num = std::to_wstring(pct);
     Fonts& fo = *fonts;
-    if (fo.vol_reserve < 0.0f) fo.vol_reserve = MeasureWidth(g, L"100", *fo.title, *fo.fmt);
+    if (fo.vol_reserve < 0.0f) fo.vol_reserve = fo.Width(g, L"100", false);
     if (fo.vol_num_pct != pct) {   // the number only changes when the level does, not every frame
-      fo.vol_num_w = MeasureWidth(g, num, *fo.title, *fo.fmt);
+      fo.vol_num_w = fo.Width(g, num, false);
       fo.vol_num_pct = pct;
     }
     const float reserve = fo.vol_reserve;
     const float nw = fo.vol_num_w;
     const float nh = fo.TitleH(g);
-    gp::SolidBrush nb(Col(style.title, style.title_a, a));
-    g.DrawString(num.c_str(), -1, fonts->title.get(),
-                 gp::PointF(std::round(right - nw), std::round(cy - nh * 0.5f)), fonts->fmt.get(), &nb);
+    if (!DrawDwRun(g, num, false, style.title, style.title_a * a, std::round(right - nw), std::round(cy - nh * 0.5f))) {
+      gp::SolidBrush nb(Col(style.title, style.title_a, a));
+      g.DrawString(num.c_str(), -1, fonts->title.get(),
+                   gp::PointF(std::round(right - nw), std::round(cy - nh * 0.5f)), fonts->fmt.get(), &nb);
+    }
 
     // speaker glyph
     const float ix = std::round(tx);
@@ -1308,7 +1391,8 @@ struct PillWindow::Impl {
     g.SetSmoothingMode(gp::SmoothingModeAntiAlias);
     g.SetInterpolationMode(gp::InterpolationModeHighQualityBicubic);
     g.SetPixelOffsetMode(gp::PixelOffsetModeHalf);
-    g.SetTextRenderingHint(gp::TextRenderingHintAntiAliasGridFit);   // no ClearType on alpha
+    g.SetTextRenderingHint(kCapsuleTextHint);   // no ClearType on alpha
+    g.SetTextContrast(kCapsuleTextContrast);
   }
 
   // Hover scale: one transform for the whole capsule group (1.0 = none).
@@ -1950,36 +2034,407 @@ struct PillWindow::Impl {
     return ok;
   }
 
-  // Right-click menu. Modal (like the tray menu): the capsule freezes until it closes.
+  // Right-click menu – custom-drawn to match the settings window (same palette, fonts, rounding).
+  // Modal: runs its own message loop until the user picks an item or clicks away.
+  // Right-click menu – custom-drawn to match the settings window (same palette, fonts, rounding).
+  // Layered popup + UpdateLayeredWindow so corners are clean (no region / no GDI ghosting).
+  // Modal: own message loop until the user picks an item or clicks away.
+  bool menu_open = false;          // a context menu is already showing (its loop is running)
+  HWND menu_hwnd_active = nullptr; // so a second right-click can dismiss it instead of stacking another
+
   void ShowContextMenu() {
-    enum : UINT { kCtxCopy = 1, kCtxLyrics, kCtxSettings, kCtxQuit };
-    HMENU menu = CreatePopupMenu();
-    if (!menu) return;
+    // Never stack menus: the capsule is WS_EX_NOACTIVATE, so right-clicking it while the menu is open does not
+    // deactivate the menu. Without this guard every click re-entered this function (nested loops, ghost menus).
+    if (menu_open) {
+      if (menu_hwnd_active && IsWindow(menu_hwnd_active)) DestroyWindow(menu_hwnd_active);
+      return;
+    }
+    menu_open = true;
+    struct OpenGuard {
+      Impl* self;
+      ~OpenGuard() { self->menu_open = false; self->menu_hwnd_active = nullptr; }
+    } open_guard{ this };
+
+    enum : int { kCopy = 1, kLyrics, kResetTiming, kSettings, kQuit };
+
+    struct Item {
+      int id = 0;
+      const wchar_t* label = nullptr;
+      const wchar_t* shortcut = nullptr;
+      bool enabled = true;
+      bool checked = false;
+      bool sep = false;
+    };
+
     const bool have_track = media->has_session && !media->title.empty();
-    AppendMenuW(menu, MF_STRING | (have_track ? MF_ENABLED : MF_GRAYED), kCtxCopy, L"Copy title and artist");
-    AppendMenuW(menu, MF_STRING | (cfg.lyrics_enabled ? MF_ENABLED : MF_GRAYED) | (lyrics_user_on ? MF_CHECKED : MF_UNCHECKED),
-                kCtxLyrics, L"Lyrics mode\tCtrl+L");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kCtxSettings, L"Open settings");
-    AppendMenuW(menu, MF_STRING, kCtxQuit, L"Quit");
+    Item items[] = {
+      { kCopy,        L"Copy title and artist", nullptr,      have_track,         false, false },
+      { kLyrics,      L"Lyrics mode",           L"Ctrl+L",    cfg.lyrics_enabled, lyrics_user_on, false },
+      { kResetTiming, L"Reset lyrics timing",   L"Ctrl+Down", lyric_ok,           false, false },
+      { 0, nullptr, nullptr, false, false, true },
+      { kSettings,    L"Open settings",         nullptr,      true,               false, false },
+      { kQuit,        L"Quit",                  nullptr,      true,               false, false },
+    };
+    constexpr int kCount = static_cast<int>(sizeof(items) / sizeof(items[0]));
 
-    POINT pt{};
-    GetCursorPos(&pt);
-    SetForegroundWindow(hwnd);   // required so the menu closes when you click elsewhere
-    const UINT cmd = static_cast<UINT>(TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_CENTERALIGN,
-                                                      pt.x, pt.y, 0, hwnd, nullptr));
-    PostMessageW(hwnd, WM_NULL, 0, 0);
-    DestroyMenu(menu);
+    // Same colours as the settings window (AppsUseLightTheme).
+    DWORD light = 1, lsz = sizeof(light);
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                 L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &lsz);
+    const bool dark = (light == 0);
+    auto rgb = [](BYTE a, int r, int g, int b) {
+      return gp::Color(a, static_cast<BYTE>(r), static_cast<BYTE>(g), static_cast<BYTE>(b));
+    };
+    const gp::Color col_bg     = dark ? rgb(255, 43, 43, 43)   : rgb(255, 255, 255, 255);
+    const gp::Color col_border = dark ? rgb(255, 60, 60, 60)   : rgb(255, 226, 226, 228);
+    const gp::Color col_text   = dark ? rgb(255, 255, 255, 255) : rgb(255, 27, 27, 27);
+    const gp::Color col_sub    = dark ? rgb(255, 160, 160, 164) : rgb(255, 98, 98, 104);
+    const gp::Color col_muted  = dark ? rgb(255, 104, 104, 108) : rgb(255, 176, 176, 182);
+    const gp::Color col_hover  = dark ? rgb(255, 58, 58, 60)    : rgb(255, 226, 226, 230);
+    const gp::Color col_accent = dark ? rgb(255, 104, 128, 255) : rgb(255, 80, 104, 240);
+    const gp::Color col_div    = dark ? rgb(255, 56, 56, 56)    : rgb(255, 238, 238, 240);
 
-    switch (cmd) {
-      case kCtxCopy: {
+    const float dpi = static_cast<float>(GetDpiForWindow(hwnd)) / 96.0f;
+    // Whole-pixel metrics: fractional text origins / font sizes are what made the text look soft.
+    auto px = [&](float v) { return std::round(v * dpi); };
+    const float pad_x = px(14.0f);
+    const float pad_y = px(6.0f);
+    const float row_h = 2.0f * std::round(16.0f * dpi);   // even, so the text's vertical centre is a whole pixel
+    const float sep_h = px(9.0f);
+    const float radius = px(8.0f);
+    const float check_w = px(20.0f);
+    const float shortcut_gap = px(28.0f);
+
+    gp::FontFamily fam(L"Segoe UI");
+    gp::Font font_label(&fam, px(12.5f), gp::FontStyleRegular, gp::UnitPixel);
+    gp::Font font_sc(&fam, px(11.5f), gp::FontStyleRegular, gp::UnitPixel);
+
+    float max_label = 0.0f, max_sc = 0.0f;
+    {
+      HDC screen = GetDC(nullptr);
+      gp::Graphics measure(screen);
+      measure.SetTextRenderingHint(gp::TextRenderingHintAntiAliasGridFit);
+      gp::StringFormat fmt(gp::StringFormat::GenericTypographic());
+      fmt.SetFormatFlags(gp::StringFormatFlagsNoWrap);
+      for (int i = 0; i < kCount; ++i) {
+        if (items[i].sep || !items[i].label) continue;
+        gp::RectF b;
+        measure.MeasureString(items[i].label, -1, &font_label, gp::PointF(0, 0), &fmt, &b);
+        if (b.Width > max_label) max_label = b.Width;
+        if (items[i].shortcut) {
+          measure.MeasureString(items[i].shortcut, -1, &font_sc, gp::PointF(0, 0), &fmt, &b);
+          if (b.Width > max_sc) max_sc = b.Width;
+        }
+      }
+      ReleaseDC(nullptr, screen);
+    }
+
+    const int win_w = static_cast<int>(std::ceil(pad_x + check_w + max_label + (max_sc > 0 ? shortcut_gap + max_sc : 0) + pad_x));
+    float content_h = pad_y * 2.0f;
+    for (int i = 0; i < kCount; ++i) content_h += items[i].sep ? sep_h : row_h;
+    const int win_h = static_cast<int>(content_h + 0.5f);
+
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    int wx = cursor.x - win_w / 2;
+    int wy = cursor.y - win_h - static_cast<int>(6 * dpi);
+    HMONITOR mon = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof(mi) };
+    if (GetMonitorInfoW(mon, &mi)) {
+      if (wx < mi.rcWork.left) wx = mi.rcWork.left + 4;
+      if (wx + win_w > mi.rcWork.right) wx = mi.rcWork.right - win_w - 4;
+      if (wy < mi.rcWork.top) wy = cursor.y + static_cast<int>(6 * dpi);
+      if (wy + win_h > mi.rcWork.bottom) wy = mi.rcWork.bottom - win_h - 4;
+    }
+
+    struct MenuState {
+      Item* items = nullptr;
+      int count = 0;
+      int hover = -1;
+      int chosen = 0;
+      bool done = false;
+      float dpi = 1, pad_x = 0, pad_y = 0, row_h = 0, sep_h = 0, radius = 0, check_w = 0;
+      int win_w = 0, win_h = 0;
+      gp::Color bg, border, text, sub, muted, hover_bg, accent, div;
+      gp::Font* font_label = nullptr;
+      gp::Font* font_sc = nullptr;
+      HWND hwnd = nullptr;
+      HINSTANCE hinst = nullptr;
+
+      void PaintLayered() {
+        if (!hwnd) return;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = win_w;
+        bi.bmiHeader.biHeight = -win_h;   // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        HBITMAP dib = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!dib || !bits) {
+          if (dib) DeleteObject(dib);
+          DeleteDC(mem);
+          ReleaseDC(nullptr, screen);
+          return;
+        }
+        HGDIOBJ old = SelectObject(mem, dib);
+        memset(bits, 0, static_cast<size_t>(win_w) * static_cast<size_t>(win_h) * 4);
+
+        {
+          gp::Graphics g(mem);
+          g.SetSmoothingMode(gp::SmoothingModeAntiAlias);
+          g.SetPixelOffsetMode(gp::PixelOffsetModeHalf);
+          g.Clear(gp::Color(0, 0, 0, 0));   // fully transparent outside the card
+
+          // Card fill
+          {
+            gp::GraphicsPath path;
+            AddRoundRect(path, 0.5f, 0.5f, static_cast<float>(win_w) - 1.0f, static_cast<float>(win_h) - 1.0f, radius);
+            gp::SolidBrush fill(bg);
+            g.FillPath(&fill, &path);
+            gp::Pen pen(border, 1.0f);
+            g.DrawPath(&pen, &path);
+            // Clip subsequent drawing to the card so nothing bleeds outside the round rect.
+            g.SetClip(&path);
+          }
+          // The card is fully opaque from here on, so ClearType is safe (the old ghosting came from text drawn
+          // over transparent pixels). Text goes after the card fill and uses the same hint as the measuring pass.
+          g.SetTextRenderingHint(gp::TextRenderingHintClearTypeGridFit);
+
+          gp::StringFormat near_fmt(gp::StringFormat::GenericTypographic());
+          near_fmt.SetAlignment(gp::StringAlignmentNear);
+          near_fmt.SetLineAlignment(gp::StringAlignmentCenter);
+          near_fmt.SetFormatFlags(gp::StringFormatFlagsNoWrap);
+          gp::StringFormat far_fmt(gp::StringFormat::GenericTypographic());
+          far_fmt.SetAlignment(gp::StringAlignmentFar);
+          far_fmt.SetLineAlignment(gp::StringAlignmentCenter);
+          far_fmt.SetFormatFlags(gp::StringFormatFlagsNoWrap);
+
+          float y = pad_y;
+          for (int i = 0; i < count; ++i) {
+            const Item& it = items[i];
+            if (it.sep) {
+              const float mid = y + sep_h * 0.5f;
+              gp::Pen pen(div, 1.0f);
+              g.DrawLine(&pen, pad_x, mid, static_cast<float>(win_w) - pad_x, mid);
+              y += sep_h;
+              continue;
+            }
+            if (i == hover && it.enabled) {
+              gp::GraphicsPath hp;
+              AddRoundRect(hp, 4.0f * dpi, y + 1.0f * dpi,
+                           static_cast<float>(win_w) - 8.0f * dpi, row_h - 2.0f * dpi, 6.0f * dpi);
+              gp::SolidBrush hb(hover_bg);
+              g.FillPath(&hb, &hp);
+            }
+            const gp::Color& tc = it.enabled ? text : muted;
+            if (it.checked) {
+              const float cx = pad_x + check_w * 0.40f;
+              const float cy = y + row_h * 0.5f;
+              gp::Pen tick(accent, 1.7f * dpi);
+              tick.SetLineCap(gp::LineCapRound, gp::LineCapRound, gp::DashCapRound);
+              g.DrawLine(&tick, cx - 3.0f * dpi, cy, cx - 0.5f * dpi, cy + 3.0f * dpi);
+              g.DrawLine(&tick, cx - 0.5f * dpi, cy + 3.0f * dpi, cx + 4.5f * dpi, cy - 3.5f * dpi);
+            }
+            gp::SolidBrush tb(tc);
+            g.DrawString(it.label, -1, font_label,
+                         gp::RectF(pad_x + check_w, y, static_cast<float>(win_w) - pad_x - check_w - pad_x, row_h),
+                         &near_fmt, &tb);
+            if (it.shortcut) {
+              gp::SolidBrush sb(sub);
+              g.DrawString(it.shortcut, -1, font_sc,
+                           gp::RectF(pad_x, y, static_cast<float>(win_w) - 2.0f * pad_x, row_h),
+                           &far_fmt, &sb);
+            }
+            y += row_h;
+          }
+        }
+
+        // Premultiply for UpdateLayeredWindow
+        auto* px = static_cast<BYTE*>(bits);
+        const size_t n = static_cast<size_t>(win_w) * static_cast<size_t>(win_h);
+        for (size_t i = 0; i < n; ++i) {
+          BYTE* p = px + i * 4;
+          const unsigned a = p[3];
+          if (a == 0) { p[0] = p[1] = p[2] = 0; }
+          else if (a < 255) {
+            p[0] = static_cast<BYTE>(p[0] * a / 255);
+            p[1] = static_cast<BYTE>(p[1] * a / 255);
+            p[2] = static_cast<BYTE>(p[2] * a / 255);
+          }
+        }
+
+        RECT wr{};
+        GetWindowRect(hwnd, &wr);
+        POINT pt_dst{ wr.left, wr.top };
+        SIZE size{ win_w, win_h };
+        POINT pt_src{ 0, 0 };
+        BLENDFUNCTION blend{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        UpdateLayeredWindow(hwnd, screen, &pt_dst, &size, mem, &pt_src, 0, &blend, ULW_ALPHA);
+
+        SelectObject(mem, old);
+        DeleteObject(dib);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+      }
+
+      int HitRow(float my) const {
+        float top = pad_y;
+        for (int i = 0; i < count; ++i) {
+          const float h = items[i].sep ? sep_h : row_h;
+          if (!items[i].sep && my >= top && my < top + h) return i;
+          top += h;
+        }
+        return -1;
+      }
+    } st;
+
+    st.items = items; st.count = kCount;
+    st.dpi = dpi; st.pad_x = pad_x; st.pad_y = pad_y; st.row_h = row_h; st.sep_h = sep_h;
+    st.radius = radius; st.check_w = check_w; st.win_w = win_w; st.win_h = win_h;
+    st.bg = col_bg; st.border = col_border; st.text = col_text; st.sub = col_sub;
+    st.muted = col_muted; st.hover_bg = col_hover; st.accent = col_accent; st.div = col_div;
+    st.font_label = &font_label; st.font_sc = &font_sc; st.hinst = hinst;
+
+    static constexpr wchar_t kMenuClass[] = L"IslandCapsuleCtxMenu";
+    static bool class_reg = false;
+    if (!class_reg) {
+      WNDCLASSEXW wc{ sizeof(wc) };
+      wc.lpfnWndProc = [](HWND hw, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT {
+        auto* s = reinterpret_cast<MenuState*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+        switch (msg) {
+          case WM_NCCREATE: {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+            SetWindowLongPtrW(hw, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+            return TRUE;
+          }
+          case WM_MOUSEMOVE: {
+            if (!s) break;
+            const float my = static_cast<float>(static_cast<short>(HIWORD(lp)));
+            const int hit = s->HitRow(my);
+            if (hit != s->hover) {
+              s->hover = hit;
+              s->PaintLayered();
+            }
+            return 0;
+          }
+          case WM_LBUTTONDOWN:
+          case WM_RBUTTONDOWN:
+          case WM_MBUTTONDOWN: {
+            // The menu holds mouse capture, so a click anywhere else (including on the capsule) lands here
+            // with coordinates outside the client area: dismiss and swallow it.
+            if (!s) break;
+            const int mx = static_cast<int>(static_cast<short>(LOWORD(lp)));
+            const int my = static_cast<int>(static_cast<short>(HIWORD(lp)));
+            if (mx < 0 || my < 0 || mx >= s->win_w || my >= s->win_h) {
+              s->done = true;
+              s->chosen = 0;
+              DestroyWindow(hw);
+            }
+            return 0;
+          }
+          case WM_CAPTURECHANGED:
+            if (s && !s->done) {   // something stole capture (another app popup): close
+              s->done = true;
+              s->chosen = 0;
+              DestroyWindow(hw);
+            }
+            return 0;
+          case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+          case WM_LBUTTONUP: {
+            if (!s) break;
+            const int mx = static_cast<int>(static_cast<short>(LOWORD(lp)));
+            const float my = static_cast<float>(static_cast<short>(HIWORD(lp)));
+            if (mx < 0 || mx >= s->win_w) return 0;
+            const int hit = s->HitRow(my);
+            if (hit >= 0 && s->items[hit].enabled) {
+              s->chosen = s->items[hit].id;
+              s->done = true;
+              DestroyWindow(hw);
+            }
+            return 0;
+          }
+          case WM_RBUTTONUP:
+          case WM_MBUTTONUP:
+            return 0;
+          case WM_KEYDOWN:
+            if (wp == VK_ESCAPE) {
+              if (s) { s->done = true; s->chosen = 0; }
+              DestroyWindow(hw);
+              return 0;
+            }
+            break;
+          case WM_ACTIVATE:
+            if (LOWORD(wp) == WA_INACTIVE && s && !s->done) {
+              s->done = true;
+              s->chosen = 0;
+              DestroyWindow(hw);
+            }
+            return 0;
+          case WM_DESTROY:
+            if (s) s->done = true;
+            return 0;
+        }
+        return DefWindowProcW(hw, msg, wp, lp);
+      };
+      wc.hInstance = hinst;
+      wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+      wc.lpszClassName = kMenuClass;
+      RegisterClassExW(&wc);
+      class_reg = true;
+    }
+
+    HWND menu_hwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        kMenuClass, L"",
+        WS_POPUP,
+        wx, wy, win_w, win_h,
+        nullptr, nullptr, hinst, &st);   // no owner – avoids layered-parent composition glitches
+    if (!menu_hwnd) return;
+    st.hwnd = menu_hwnd;
+
+    menu_hwnd_active = menu_hwnd;
+    st.PaintLayered();
+    ShowWindow(menu_hwnd, SW_SHOWNA);
+    SetForegroundWindow(menu_hwnd);
+    SetCapture(menu_hwnd);   // reliable outside-click dismissal even when foreground activation is refused
+
+    // Modal loop, but it keeps the capsule alive: the main loop is blocked while we are in here, so Tick()
+    // (z-order guard, taskbar-cover check, animation, media state) must be driven from this loop too.
+    // Without it the capsule froze, fell behind the taskbar and vanished.
+    MSG msg{};
+    while (!st.done) {
+      MsgWaitForMultipleObjects(0, nullptr, FALSE, 16, QS_ALLINPUT);
+      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) {
+          st.done = true;
+          st.chosen = 0;
+          PostQuitMessage(static_cast<int>(msg.wParam));
+          break;
+        }
+        // Keys go to the menu even though it may not be the active window.
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+      }
+      if (!st.done) Tick();
+    }
+    if (GetCapture() == menu_hwnd) ReleaseCapture();
+    if (IsWindow(menu_hwnd)) DestroyWindow(menu_hwnd);
+
+    switch (st.chosen) {
+      case kCopy: {
         const std::wstring text = media->artist.empty() ? media->title : media->artist + L" - " + media->title;
         Logf(CopyText(text) ? L"[menu] copied title and artist\r\n" : L"[menu] could not open the clipboard\r\n");
         break;
       }
-      case kCtxLyrics:   ToggleLyrics(); break;
-      case kCtxSettings: OpenSettingsWindow(hinst); break;
-      case kCtxQuit:     PostQuitMessage(0); break;   // the loader's loop sees WM_QUIT and shuts down cleanly
+      case kLyrics:      ToggleLyrics(); break;
+      case kResetTiming: NudgeLyrics(0); break;
+      case kSettings:    OpenSettingsWindow(hinst); break;
+      case kQuit:        PostQuitMessage(0); break;
       default: break;
     }
   }
