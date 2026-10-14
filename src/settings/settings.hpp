@@ -39,6 +39,10 @@ struct Settings {
   bool lyrics_mode = false;          // the user wants the capsule to show lyrics (saved when toggled, survives restarts)
   int lyrics_offset_ms = 0;          // shifts lyric timing for ALL songs: positive = lyrics appear later (-5000..5000)
   bool lyrics_cache = true;          // keep fetched lyrics (and per-song timing nudges) on disk; false => no disk cache
+
+  // Capsule text font (ini key font=). "default" resolves to Segoe UI Variable Text; any other value is used
+  // as a family name and falls back if the face is not installed.
+  std::wstring font = L"default";
 };
 
 std::wstring SettingsPath();
@@ -57,6 +61,19 @@ const wchar_t* AnchorName(PillAnchor a);
 const wchar_t* VizName(VizStyle v);
 bool ParseAnchor(const std::wstring& s, PillAnchor* out);
 bool ParseViz(const std::wstring& s, VizStyle* out);
+
+// Font presets for the settings window (two Segmented rows of three).
+// kFontPresets: values written to settings.ini (font=). "default" => Segoe UI Variable Text.
+// kFontPresetLabels: short labels shown in the UI.
+constexpr int kFontPresetCount = 6;
+inline const wchar_t* const kFontPresets[kFontPresetCount] = {
+    L"default", L"Segoe UI", L"Bahnschrift", L"Calibri", L"Georgia", L"Consolas"};
+inline const wchar_t* const kFontPresetLabels[kFontPresetCount] = {
+    L"Default", L"Segoe UI", L"Bahnschrift", L"Calibri", L"Georgia", L"Consolas"};
+
+// Maps Settings::font ("default" or a family name) to the GDI+/DirectWrite family string.
+// Does not check whether the face is installed; callers (Fonts / DwText) fall back themselves.
+std::wstring ResolveFontFamily(const std::wstring& font);
 
 // Polls the file's modification time.
 class SettingsWatcher {

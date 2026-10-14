@@ -99,6 +99,12 @@ bool ParseViz(const std::wstring& s, VizStyle* out) {
   return false;
 }
 
+std::wstring ResolveFontFamily(const std::wstring& font) {
+  const std::wstring v = Lower(Trim(font));
+  if (v.empty() || v == L"default") return L"Segoe UI Variable Text";
+  return Trim(font);   // preserve the user's casing for the family name
+}
+
 std::wstring SettingsPath() {
   wchar_t base[MAX_PATH] = {};
   const DWORD n = GetEnvironmentVariableW(L"APPDATA", base, MAX_PATH);
@@ -141,6 +147,10 @@ Settings LoadSettings() {
   s.lyrics_cache = ReadBool(p, L"lyrics_cache", s.lyrics_cache);
   // GetPrivateProfileInt cannot be trusted with negative numbers, so parse the text.
   s.lyrics_offset_ms = (std::clamp)(static_cast<int>(wcstol(ReadString(p, L"lyrics_offset_ms", L"0").c_str(), nullptr, 10)), -5000, 5000);
+  {
+    const std::wstring f = ReadString(p, L"font", L"default");
+    s.font = f.empty() ? L"default" : f;
+  }
   return s;
 }
 
@@ -203,7 +213,10 @@ bool EnsureSettingsFile() {
       "; One song only: Ctrl+Left / Ctrl+Right over the capsule nudges it by 100 ms (Ctrl+Down resets it).\r\n"
       "lyrics_offset_ms=0\r\n"
       "; keep fetched lyrics and per-song nudges on disk (%APPDATA%\\IslandCapsule\\lyrics); false = no disk cache\r\n"
-      "lyrics_cache=true\r\n";
+      "lyrics_cache=true\r\n"
+      "; capsule text font: default (Segoe UI Variable Text) | Segoe UI | Bahnschrift | Calibri | Georgia | Consolas\r\n"
+      "; or any installed family name (falls back if missing)\r\n"
+      "font=default\r\n";
 
   HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                          FILE_ATTRIBUTE_NORMAL, nullptr);
