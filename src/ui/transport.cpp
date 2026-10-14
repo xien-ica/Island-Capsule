@@ -73,7 +73,7 @@ void TransportStrip::Layout(double scale, int height_px, bool inner_left) {
   spacing_ = std::round(static_cast<float>(5.0 * scale));               // roomier: gap between buttons
   overlap_ = static_cast<float>(height_px) * 0.6f;                      // tucked under the pill
 
-  const float inner_pad = std::round(static_cast<float>(6.0 * scale));    // gap next to the main capsule
+  const float inner_pad = std::round(static_cast<float>(5.0 * scale));    // gap next to the main capsule
   const float outer_pad = std::round(static_cast<float>(12.0 * scale));   // far end of the strip
   pad_l_ = inner_left ? overlap_ + inner_pad : outer_pad;
   pad_r_ = inner_left ? outer_pad : overlap_ + inner_pad;
