@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "lyrics/lrclib.hpp"
 #include "settings/settings.hpp"
 #include "ui/tray.hpp"
 
@@ -92,18 +93,18 @@ std::wstring Trim(const std::wstring& s) {
 // ---------------------------------------------------------------------------------------------
 // Model
 
-enum class Kind { Toggle, Segmented, Slider, EditBox };
+enum class Kind { Toggle, Segmented, Slider, EditBox, Buttons };
 
 struct Row {
   Kind kind = Kind::Toggle;
   std::wstring title, caption;
-  std::vector<std::wstring> options;   // Segmented
-  float segw = 60.0f;                  // logical px per option
+  std::vector<std::wstring> options;   // Segmented / Buttons
+  float segw = 60.0f;                  // logical px per option (Segmented)
   int lo = 0, hi = 1, step = 1;        // Slider
   std::wstring suffix;                 // Slider value suffix
   int edit = -1;                       // EditBox: index into Ui::edits
   std::function<int()> get;
-  std::function<void(int)> set;
+  std::function<void(int)> set;        // Buttons: called with the button index on click
 
   gp::RectF rect, ctrl;                // device px, filled by Layout()
   float Height() const { return kind == Kind::EditBox ? 84.0f : 46.0f; }
@@ -216,6 +217,16 @@ struct Ui {
     return r;
   }
 
+  // A row of small action buttons on the right. `set(i)` is called when button i is clicked.
+  Row ButtonsRow(const wchar_t* title, const wchar_t* caption, std::vector<std::wstring> labels,
+                 std::function<void(int)> on_click) {
+    Row r;
+    r.kind = Kind::Buttons; r.title = title; r.caption = caption;
+    r.options = std::move(labels);
+    r.set = std::move(on_click);
+    return r;
+  }
+
   void BuildPages() {
     // --- Capsule ---------------------------------------------------------------------------
     {
@@ -233,6 +244,24 @@ struct Ui {
           [this] { return cfg.strip_left ? 0 : 1; },
           [this](int v) { cfg.strip_left = (v == 0); SaveSettingValue(L"strip_side", cfg.strip_left ? L"left" : L"right"); }));
       pages[0].push_back(std::move(layout));
+
+      // Text font: six presets over two rows (a single row of six would not fit the window).
+      Section text;
+      text.title = L"Text";
+      for (int row = 0; row < 2; ++row) {
+        std::vector<std::wstring> labels;
+        for (int i = row * 3; i < row * 3 + 3; ++i) labels.push_back(kFontPresetLabels[i]);
+        const int base = row * 3;
+        text.rows.push_back(SegRow(row == 0 ? L"Font" : L"", row == 0 ? L"Capsule title, artist and lyrics" : L"",
+            std::move(labels), 96.0f,
+            [this, base] {
+              for (int i = 0; i < 3; ++i)
+                if (_wcsicmp(cfg.font.c_str(), kFontPresets[base + i]) == 0) return i;
+              return -1;   // another preset, or a custom name set in settings.ini
+            },
+            [this, base](int v) { cfg.font = kFontPresets[base + v]; SaveSettingValue(L"font", cfg.font); }));
+      }
+      pages[0].push_back(std::move(text));
 
       Section viz;
       viz.title = L"Visualizer";
@@ -279,6 +308,21 @@ struct Ui {
                                     &Settings::lyrics_enabled, L"lyrics_enabled"));
       lyrics.rows.push_back(BoolRow(L"Cache lyrics on disk", L"Replays need no network; also keeps per-song nudges",
                                     &Settings::lyrics_cache, L"lyrics_cache"));
+      lyrics.rows.push_back(ButtonsRow(L"Lyrics cache", L"Open the folder or delete every cached file (nudges too)",
+          { L"Open folder", L"Clear cache" },
+          [this](int i) {
+            if (i == 0) {
+              const std::wstring dir = LyricsFetcher::CacheDir();
+              CreateDirectoryW(dir.c_str(), nullptr);   // so Explorer opens even on a fresh install
+              ShellExecuteW(hwnd, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            } else if (i == 1) {
+              const int n = LyricsFetcher::ClearDiskCache();
+              // Brief confirmation in the caption is overkill; a message box keeps it obvious.
+              wchar_t buf[96];
+              swprintf_s(buf, L"Removed %d cached file%s.", n, n == 1 ? L"" : L"s");
+              MessageBoxW(hwnd, buf, L"Island Capsule", MB_OK | MB_ICONINFORMATION);
+            }
+          }));
       lyrics.rows.push_back(SliderRow(L"Lyrics offset", L"All songs; positive = later (Ctrl+Left/Right = one song)",
                                       -5000, 5000, 50, L" ms", &Settings::lyrics_offset_ms, L"lyrics_offset_ms"));
       pages[1].push_back(std::move(lyrics));
@@ -427,6 +471,18 @@ struct Ui {
         const float value_w = 52.0f * s, track_w = 140.0f * s;
         const float x = right - value_w - 10.0f * s - track_w;
         r.ctrl = gp::RectF(x - 8.0f * s, cy - 12.0f * s, track_w + 16.0f * s, 24.0f * s);
+        break;
+      }
+      case Kind::Buttons: {
+        // Pack buttons on the right; each is measured from its label width.
+        float total = 0.0f;
+        const float gap = 8.0f * s, pad_x = 12.0f * s, h = 26.0f * s;
+        for (const auto& lab : r.options) {
+          // Approximate width: ~7.2 logical px per character at 11.5 pt + horizontal padding.
+          total += (std::max)(64.0f * s, static_cast<float>(lab.size()) * 7.2f * s + 2.0f * pad_x);
+        }
+        if (!r.options.empty()) total += gap * static_cast<float>(r.options.size() - 1);
+        r.ctrl = gp::RectF(right - total, cy - h / 2.0f, total, h);
         break;
       }
       case Kind::EditBox:
@@ -605,6 +661,24 @@ struct Ui {
     g.DrawPath(&pen, &p);
   }
 
+  void DrawButtons(gp::Graphics& g, const Row& r, int idx) {
+    const float gap = 8.0f * s, pad_x = 12.0f * s;
+    float bx = r.ctrl.X;
+    for (size_t b = 0; b < r.options.size(); ++b) {
+      const float bw = (std::max)(64.0f * s, static_cast<float>(r.options[b].size()) * 7.2f * s + 2.0f * pad_x);
+      const gp::RectF btn(bx, r.ctrl.Y, bw, r.ctrl.Height);
+      const bool hover = hot.row == idx && hot.part == static_cast<int>(b);
+      FillRound(g, btn, 6.0f * s, hover ? pal.segHover : pal.segBg);
+      gp::Pen edge(pal.border, 1.0f);
+      gp::GraphicsPath path;
+      AddRoundRect(path, btn.X + 0.5f, btn.Y + 0.5f, btn.Width - 1.0f, btn.Height - 1.0f, 6.0f * s);
+      g.DrawPath(&edge, &path);
+      Text(g, r.options[b], *f_seg, hover ? pal.accent : pal.text, btn.X, btn.Y, btn.Width, btn.Height,
+           gp::StringAlignmentCenter);
+      bx += bw + gap;
+    }
+  }
+
   void DrawRow(gp::Graphics& g, const Row& r, int idx) {
     const float tx = r.rect.X + 16.0f * s;
     const bool is_edit = r.kind == Kind::EditBox;
@@ -621,6 +695,7 @@ struct Ui {
       case Kind::Toggle:    DrawToggle(g, r); break;
       case Kind::Segmented: DrawSegmented(g, r, idx); break;
       case Kind::Slider:    DrawSlider(g, r); break;
+      case Kind::Buttons:   DrawButtons(g, r, idx); break;
       case Kind::EditBox:   DrawEditFrame(g, r); break;
     }
   }
@@ -727,6 +802,22 @@ struct Ui {
         case Kind::Slider:
           if (r.ctrl.Contains(x, y)) { h.row = static_cast<int>(i); h.part = 0; }
           break;
+        case Kind::Buttons:
+          if (r.ctrl.Contains(x, y)) {
+            // Walk the same packing used in DrawButtons to find which button was hit.
+            const float gap = 8.0f * s, pad_x = 12.0f * s;
+            float bx = r.ctrl.X;
+            for (size_t b = 0; b < r.options.size(); ++b) {
+              const float bw = (std::max)(64.0f * s, static_cast<float>(r.options[b].size()) * 7.2f * s + 2.0f * pad_x);
+              if (x >= bx && x < bx + bw) {
+                h.row = static_cast<int>(i);
+                h.part = static_cast<int>(b);
+                break;
+              }
+              bx += bw + gap;
+            }
+          }
+          break;
         case Kind::EditBox:
           break;
       }
@@ -778,6 +869,9 @@ struct Ui {
         drag = h.row;
         SetCapture(hwnd);
         SliderTo(r, x);
+        break;
+      case Kind::Buttons:
+        if (h.part >= 0 && r.set) r.set(h.part);
         break;
       case Kind::EditBox:   break;
     }
