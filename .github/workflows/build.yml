@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DISLAND_CONSOLE=OFF -DISLAND_TESTS=ON
+
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel
+
+      - name: Run lyrics_test
+        run: build\bin\Release\lyrics_test.exe
+
+      - name: Check the exe does not use the debug runtime
+        shell: pwsh
+        run: |
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("build\bin\Release\island_loader.exe"))
+          if ($text -match "(?i)(vcruntime140d|msvcp140d|ucrtbased)\.dll") { throw "island_loader.exe links the DEBUG runtime" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "IslandCapsule-${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_number) }}-windows-x64.zip"
+          Compress-Archive -Path build\bin\Release\island_loader.exe, LICENSE -DestinationPath $name
+          "ZIP_NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Publish GitHub release (tags only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_NAME }}
