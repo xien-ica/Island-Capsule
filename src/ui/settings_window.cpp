@@ -37,10 +37,13 @@ namespace {
 namespace gp = Gdiplus;
 
 constexpr wchar_t kClass[] = L"IslandCapsuleSettings";
-constexpr int kClientW = 500;   // logical px
+constexpr int kClientW = 540;   // logical px
 constexpr int kClientH = 540;
 constexpr UINT_PTR kEditTimer = 1;
 constexpr int kEditId = 2001;
+constexpr float kCapLineH = 15.0f;   // logical px per wrapped caption line
+constexpr UINT_PTR kStatsTimer = 2;   // refreshes the lyrics cache size while the Behavior tab is open
+constexpr int kPopupPart = 100;       // Hot::part values >= this are items of the open dropdown list
 constexpr int kTabCount = 3;
 const wchar_t* const kTabNames[kTabCount] = { L"Capsule", L"Behavior", L"Media" };
 
@@ -93,7 +96,7 @@ std::wstring Trim(const std::wstring& s) {
 // ---------------------------------------------------------------------------------------------
 // Model
 
-enum class Kind { Toggle, Segmented, Slider, EditBox, Buttons };
+enum class Kind { Toggle, Segmented, Slider, EditBox, Buttons, Dropdown, Info };
 
 struct Row {
   Kind kind = Kind::Toggle;
@@ -103,11 +106,18 @@ struct Row {
   int lo = 0, hi = 1, step = 1;        // Slider
   std::wstring suffix;                 // Slider value suffix
   int edit = -1;                       // EditBox: index into Ui::edits
-  std::function<int()> get;
+  std::vector<std::wstring> previews;  // Dropdown: font family per option (list items drawn in their own face); may be empty
+  std::function<std::wstring()> text;  // Dropdown: label of the current value; Info: the value shown on the right
+  std::function<int()> get;            // Dropdown: selected option or -1
   std::function<void(int)> set;        // Buttons: called with the button index on click
 
   gp::RectF rect, ctrl;                // device px, filled by Layout()
-  float Height() const { return kind == Kind::EditBox ? 84.0f : 46.0f; }
+  int cap_lines = 1;                   // caption lines needed at the current width (captions wrap, never truncate)
+  float cap_key = -1.0f;               // text width cap_lines was measured for (-1 = measure again)
+  float dd_w = -1.0f;                  // Dropdown: measured button width, device px (-1 = measure again)
+  float Height() const {
+    return (kind == Kind::EditBox ? 84.0f : 46.0f) + (caption.empty() ? 0.0f : static_cast<float>(cap_lines - 1) * kCapLineH);
+  }
 };
 
 struct Section {
@@ -164,6 +174,9 @@ struct Ui {
   float max_scroll = 0.0f;
   float view_top = 0.0f, view_bot = 0.0f;
   HICON icon_big = nullptr, icon_small = nullptr;   // the capsule (tray) icon, shown in the title bar
+  int open_dd = -1;           // index into `flat` of the dropdown whose list is open, or -1
+  int cache_files = 0;
+  unsigned long long cache_bytes = 0;
   bool sb_drag = false;
   float sb_grab = 0.0f;       // pointer offset inside the thumb while dragging
 
@@ -227,6 +240,63 @@ struct Ui {
     return r;
   }
 
+  // A dropdown: a button showing the current value that opens a list of `options` below it.
+  Row DropRow(const wchar_t* title, const wchar_t* caption, std::vector<std::wstring> options,
+              std::vector<std::wstring> previews, std::function<std::wstring()> label,
+              std::function<int()> get, std::function<void(int)> set) {
+    Row r;
+    r.kind = Kind::Dropdown; r.title = title; r.caption = caption;
+    r.options = std::move(options); r.previews = std::move(previews);
+    r.text = std::move(label); r.get = std::move(get); r.set = std::move(set);
+    return r;
+  }
+
+  // A read-only value on the right.
+  Row InfoRow(const wchar_t* title, const wchar_t* caption, std::function<std::wstring()> text) {
+    Row r;
+    r.kind = Kind::Info; r.title = title; r.caption = caption; r.text = std::move(text);
+    return r;
+  }
+
+  static std::wstring FormatBytes(unsigned long long b) {
+    wchar_t buf[48];
+    if (b < 1024ULL) swprintf_s(buf, L"%llu B", b);
+    else if (b < 1024ULL * 1024ULL) swprintf_s(buf, L"%.1f KB", static_cast<double>(b) / 1024.0);
+    else swprintf_s(buf, L"%.2f MB", static_cast<double>(b) / (1024.0 * 1024.0));
+    return buf;
+  }
+
+  // Counts the cached .txt files in the lyrics folder and adds up their size (one directory listing).
+  static void DiskCacheStats(int* files, unsigned long long* bytes) {
+    int n = 0;
+    unsigned long long total = 0;
+    const std::wstring dir = LyricsFetcher::CacheDir();
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = dir.empty() ? INVALID_HANDLE_VALUE : FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+      do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const std::wstring name = fd.cFileName;
+        if (name.size() < 4 || _wcsicmp(name.c_str() + name.size() - 4, L".txt") != 0) continue;
+        ++n;
+        total += (static_cast<unsigned long long>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+      } while (FindNextFileW(h, &fd));
+      FindClose(h);
+    }
+    *files = n;
+    *bytes = total;
+  }
+
+  void RefreshCacheStats() {
+    int n = 0;
+    unsigned long long b = 0;
+    DiskCacheStats(&n, &b);
+    if (n != cache_files || b != cache_bytes) {
+      cache_files = n; cache_bytes = b;
+      if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+    }
+  }
+
   void BuildPages() {
     // --- Capsule ---------------------------------------------------------------------------
     {
@@ -245,21 +315,24 @@ struct Ui {
           [this](int v) { cfg.strip_left = (v == 0); SaveSettingValue(L"strip_side", cfg.strip_left ? L"left" : L"right"); }));
       pages[0].push_back(std::move(layout));
 
-      // Text font: six presets over two rows (a single row of six would not fit the window).
+      // Text font: a dropdown of the presets (each shown in its own face).
       Section text;
       text.title = L"Text";
-      for (int row = 0; row < 2; ++row) {
-        std::vector<std::wstring> labels;
-        for (int i = row * 3; i < row * 3 + 3; ++i) labels.push_back(kFontPresetLabels[i]);
-        const int base = row * 3;
-        text.rows.push_back(SegRow(row == 0 ? L"Font" : L"", row == 0 ? L"Capsule title, artist and lyrics" : L"",
-            std::move(labels), 96.0f,
-            [this, base] {
-              for (int i = 0; i < 3; ++i)
-                if (_wcsicmp(cfg.font.c_str(), kFontPresets[base + i]) == 0) return i;
-              return -1;   // another preset, or a custom name set in settings.ini
+      {
+        std::vector<std::wstring> labels, values;
+        for (int i = 0; i < kFontPresetCount; ++i) { labels.push_back(kFontPresetLabels[i]); values.push_back(kFontPresets[i]); }
+        text.rows.push_back(DropRow(L"Font", L"Capsule title, artist and lyrics", std::move(labels), std::move(values),
+            [this] {
+              for (int i = 0; i < kFontPresetCount; ++i)
+                if (_wcsicmp(cfg.font.c_str(), kFontPresets[i]) == 0) return std::wstring(kFontPresetLabels[i]);
+              return cfg.font;   // a custom name set in settings.ini
             },
-            [this, base](int v) { cfg.font = kFontPresets[base + v]; SaveSettingValue(L"font", cfg.font); }));
+            [this] {
+              for (int i = 0; i < kFontPresetCount; ++i)
+                if (_wcsicmp(cfg.font.c_str(), kFontPresets[i]) == 0) return i;
+              return -1;
+            },
+            [this](int v) { cfg.font = kFontPresets[v]; SaveSettingValue(L"font", cfg.font); }));
       }
       pages[0].push_back(std::move(text));
 
@@ -320,8 +393,15 @@ struct Ui {
               // Brief confirmation in the caption is overkill; a message box keeps it obvious.
               wchar_t buf[96];
               swprintf_s(buf, L"Removed %d cached file%s.", n, n == 1 ? L"" : L"s");
+              RefreshCacheStats();
               MessageBoxW(hwnd, buf, L"Island Capsule", MB_OK | MB_ICONINFORMATION);
             }
+          }));
+      lyrics.rows.push_back(InfoRow(L"Cache size", L"Lyrics cached on disk right now",
+          [this] {
+            wchar_t buf[96];
+            swprintf_s(buf, L"%d file%s \u00B7 ", cache_files, cache_files == 1 ? L"" : L"s");
+            return std::wstring(buf) + FormatBytes(cache_bytes);
           }));
       lyrics.rows.push_back(SliderRow(L"Lyrics offset", L"All songs; positive = later (Ctrl+Left/Right = one song)",
                                       -5000, 5000, 50, L" ms", &Settings::lyrics_offset_ms, L"lyrics_offset_ms"));
@@ -360,6 +440,35 @@ struct Ui {
 
   // ---- setup ---------------------------------------------------------------------------------
 
+  // Forget measured caption / dropdown sizes (fonts, DPI or the shown values changed).
+  void InvalidateMeasure() {
+    for (auto& page : pages)
+      for (Section& sec : page)
+        for (Row& r : sec.rows) { r.cap_key = -1.0f; r.dd_w = -1.0f; }
+  }
+
+  float TextWidth(const std::wstring& t, const gp::Font& f) {
+    gp::Graphics g(hwnd);
+    gp::StringFormat fmt(gp::StringFormat::GenericTypographic());
+    fmt.SetFormatFlags(gp::StringFormatFlagsNoWrap | gp::StringFormatFlagsMeasureTrailingSpaces);
+    gp::RectF out;
+    g.MeasureString(t.c_str(), -1, &f, gp::RectF(0, 0, 10000.0f, 1000.0f), &fmt, &out);
+    return out.Width;
+  }
+
+  // Number of lines the caption needs when wrapped to `w` device px.
+  int CaptionLines(const std::wstring& t, float w) {
+    if (t.empty() || w <= 8.0f) return 1;
+    gp::Graphics g(hwnd);
+    gp::StringFormat fmt(gp::StringFormat::GenericTypographic());
+    // GenericTypographic carries NoWrap (and LineLimit): clear them or the text never wraps and always measures as one line.
+    fmt.SetFormatFlags(fmt.GetFormatFlags() & ~(gp::StringFormatFlagsNoWrap | gp::StringFormatFlagsLineLimit));
+    gp::RectF out;
+    int cp = 0, lines = 1;
+    g.MeasureString(t.c_str(), -1, f_cap.get(), gp::RectF(0, 0, w, 10000.0f), &fmt, &out, &cp, &lines);
+    return (std::max)(1, lines);
+  }
+
   void MakeFonts() {
     fam = std::make_unique<gp::FontFamily>(L"Segoe UI");
     auto mk = [&](float px, int style) {
@@ -379,6 +488,7 @@ struct Ui {
                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     for (HWND e : edits)
       if (e) SendMessageW(e, WM_SETFONT, reinterpret_cast<WPARAM>(edit_font), TRUE);
+    InvalidateMeasure();
   }
 
   void ApplyTheme() {
@@ -433,16 +543,21 @@ struct Ui {
     CommitEdits();
     cfg = LoadSettings();
     autostart = IsAutostartEnabled();
+    RefreshCacheStats();
+    InvalidateMeasure();
     SyncEdits();
+    Layout();
     InvalidateRect(hwnd, nullptr, FALSE);
   }
 
   void SetPage(int p) {
     if (p == page) return;
     CommitEdits();
+    open_dd = -1;
     page = p;
     cfg = LoadSettings();
     autostart = IsAutostartEnabled();
+    RefreshCacheStats();
     SyncEdits();
     hot = Hot{};
     scroll = 0.0f;
@@ -485,8 +600,23 @@ struct Ui {
         r.ctrl = gp::RectF(right - total, cy - h / 2.0f, total, h);
         break;
       }
+      case Kind::Dropdown: {
+        if (r.dd_w < 0.0f) {   // wide enough for the longest option (listed in its own, slightly larger face) and the current value
+          float widest = r.text ? TextWidth(r.text(), *f_seg) : 0.0f;
+          for (const auto& o : r.options) widest = (std::max)(widest, TextWidth(o, *f_seg) * 1.12f);
+          r.dd_w = (std::max)(150.0f * s, widest + 52.0f * s);
+        }
+        const float w = (std::min)(r.dd_w, r.rect.Width * 0.55f), h = 28.0f * s;
+        r.ctrl = gp::RectF(right - w, cy - h / 2.0f, w, h);
+        break;
+      }
+      case Kind::Info: {
+        const float w = 190.0f * s;
+        r.ctrl = gp::RectF(right - w, r.rect.Y, w, r.rect.Height);
+        break;
+      }
       case Kind::EditBox:
-        r.ctrl = gp::RectF(r.rect.X + 16.0f * s, r.rect.Y + 46.0f * s, r.rect.Width - 32.0f * s, 28.0f * s);
+        r.ctrl = gp::RectF(r.rect.X + 16.0f * s, r.rect.Y + (46.0f + (r.caption.empty() ? 0.0f : static_cast<float>(r.cap_lines - 1) * kCapLineH)) * s, r.rect.Width - 32.0f * s, 28.0f * s);
         break;
     }
   }
@@ -511,6 +641,18 @@ struct Ui {
       for (Row& r : sec.rows) {
         r.rect = gp::RectF(pad, y, W - 2.0f * pad, r.Height() * s);
         LayoutRow(r);
+        // Captions wrap instead of being cut off: measure against the space left of the control.
+        if (!r.caption.empty()) {
+          const float tw = (r.kind == Kind::EditBox ? r.rect.GetRight() - 16.0f * s : r.ctrl.X - 12.0f * s) - (r.rect.X + 16.0f * s);
+          if (tw != r.cap_key) {
+            r.cap_key = tw;
+            r.cap_lines = CaptionLines(r.caption, tw - 2.0f * s);
+          }
+          if (std::fabs(r.rect.Height - r.Height() * s) > 0.5f) {
+            r.rect.Height = r.Height() * s;
+            LayoutRow(r);
+          }
+        }
         flat.push_back(&r);
         y += r.rect.Height;
       }
@@ -577,13 +719,14 @@ struct Ui {
   // ---- drawing -------------------------------------------------------------------------------
 
   void Text(gp::Graphics& g, const std::wstring& t, const gp::Font& f, const gp::Color& c, float x, float y, float w,
-            float h, gp::StringAlignment align = gp::StringAlignmentNear) {
+            float h, gp::StringAlignment align = gp::StringAlignmentNear, bool wrap = false) {
     if (w <= 0.0f) return;
     gp::StringFormat fmt(gp::StringFormat::GenericTypographic());
     fmt.SetAlignment(align);
-    fmt.SetLineAlignment(gp::StringAlignmentCenter);
+    fmt.SetLineAlignment(wrap ? gp::StringAlignmentNear : gp::StringAlignmentCenter);
     fmt.SetTrimming(gp::StringTrimmingEllipsisCharacter);
-    fmt.SetFormatFlags(gp::StringFormatFlagsNoWrap);
+    if (wrap) fmt.SetFormatFlags(fmt.GetFormatFlags() & ~(gp::StringFormatFlagsNoWrap | gp::StringFormatFlagsLineLimit));
+    else fmt.SetFormatFlags(gp::StringFormatFlagsNoWrap);
     gp::SolidBrush b(c);
     g.DrawString(t.c_str(), -1, &f, gp::RectF(x, y, w, h), &fmt, &b);
   }
@@ -679,6 +822,77 @@ struct Ui {
     }
   }
 
+  // ---- dropdown ------------------------------------------------------------------------------
+
+  float ItemH() const { return 28.0f * s; }
+
+  // The open list for dropdown `r`: below its button, or above it when there is no room left in the view.
+  gp::RectF PopupRect(const Row& r) const {
+    const float pad = 4.0f * s;
+    const float h = static_cast<float>(r.options.size()) * ItemH() + 2.0f * pad;
+    float y = r.ctrl.GetBottom() + 4.0f * s;
+    if (y + h > view_bot) y = (std::max)(view_top, r.ctrl.Y - 4.0f * s - h);
+    return gp::RectF(r.ctrl.X, y, r.ctrl.Width, h);
+  }
+
+  void CloseDropdown() {
+    if (open_dd < 0) return;
+    open_dd = -1;
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+  }
+
+  void DrawDropdown(gp::Graphics& g, const Row& r, int idx) {
+    const bool open = open_dd == idx;
+    const bool hover = hot.row == idx && hot.part == 0;
+    const gp::RectF& c = r.ctrl;
+    FillRound(g, c, 8.0f * s, (hover && !open) ? pal.segHover : pal.segBg);
+    gp::GraphicsPath path;
+    AddRoundRect(path, c.X + 0.5f, c.Y + 0.5f, c.Width - 1.0f, c.Height - 1.0f, 8.0f * s);
+    gp::Pen edge(open ? pal.accent : pal.border, open ? 1.5f : 1.0f);
+    g.DrawPath(&edge, &path);
+    Text(g, r.text ? r.text() : std::wstring(), *f_seg, pal.text, c.X + 12.0f * s, c.Y, c.Width - 36.0f * s, c.Height);
+
+    // chevron
+    const float cx = c.GetRight() - 16.0f * s, cy = c.Y + c.Height / 2.0f, d = 3.5f * s, dy = open ? d : -d;
+    gp::Pen chev(open ? pal.accent : pal.sub, 1.6f * s);
+    chev.SetLineCap(gp::LineCapRound, gp::LineCapRound, gp::DashCapRound);
+    g.DrawLine(&chev, cx - d, cy + dy * 0.5f, cx, cy - dy * 0.5f);
+    g.DrawLine(&chev, cx, cy - dy * 0.5f, cx + d, cy + dy * 0.5f);
+  }
+
+  void DrawDropdownList(gp::Graphics& g, const Row& r, int idx) {
+    const gp::RectF pr = PopupRect(r);
+    for (int i = 3; i >= 1; --i)   // soft shadow
+      FillRound(g, gp::RectF(pr.X - i * s, pr.Y + (i + 1) * s, pr.Width + 2.0f * i * s, pr.Height + i * s), 10.0f * s,
+                gp::Color(static_cast<BYTE>(pal.dark ? 34 : 18), 0, 0, 0));
+    FillRound(g, pr, 8.0f * s, pal.card);
+    gp::GraphicsPath path;
+    AddRoundRect(path, pr.X + 0.5f, pr.Y + 0.5f, pr.Width - 1.0f, pr.Height - 1.0f, 8.0f * s);
+    gp::Pen edge(pal.border, 1.0f);
+    g.DrawPath(&edge, &path);
+
+    const int sel = r.get();
+    for (size_t i = 0; i < r.options.size(); ++i) {
+      const gp::RectF item(pr.X + 4.0f * s, pr.Y + 4.0f * s + static_cast<float>(i) * ItemH(), pr.Width - 8.0f * s, ItemH());
+      const bool selected = static_cast<int>(i) == sel;
+      const bool hovered = hot.row == idx && hot.part == kPopupPart + static_cast<int>(i);
+      if (selected) FillRound(g, item, 6.0f * s, pal.accent);
+      else if (hovered) FillRound(g, item, 6.0f * s, pal.segHover);
+
+      const gp::Font* font = f_seg.get();
+      std::unique_ptr<gp::FontFamily> ff;
+      std::unique_ptr<gp::Font> preview;
+      if (i < r.previews.size()) {   // show each option in its own face (falls back when not installed)
+        ff = std::make_unique<gp::FontFamily>(ResolveFontFamily(r.previews[i]).c_str());
+        if (ff->IsAvailable()) {
+          preview = std::make_unique<gp::Font>(ff.get(), 13.5f * s, gp::FontStyleRegular, gp::UnitPixel);
+          font = preview.get();
+        }
+      }
+      Text(g, r.options[i], *font, selected ? pal.white : pal.text, item.X + 10.0f * s, item.Y, item.Width - 20.0f * s, item.Height);
+    }
+  }
+
   void DrawRow(gp::Graphics& g, const Row& r, int idx) {
     const float tx = r.rect.X + 16.0f * s;
     const bool is_edit = r.kind == Kind::EditBox;
@@ -688,7 +902,11 @@ struct Ui {
       Text(g, r.title, *f_title, pal.text, tx, r.rect.Y, tw, is_edit ? 46.0f * s : r.rect.Height);
     } else {
       Text(g, r.title, *f_title, pal.text, tx, r.rect.Y + 8.0f * s, tw, 18.0f * s);
-      Text(g, r.caption, *f_cap, pal.sub, tx, r.rect.Y + 26.0f * s, tw, 14.0f * s);
+      if (r.cap_lines > 1)
+        Text(g, r.caption, *f_cap, pal.sub, tx, r.rect.Y + 26.0f * s, tw, kCapLineH * s * static_cast<float>(r.cap_lines),
+             gp::StringAlignmentNear, true);
+      else
+        Text(g, r.caption, *f_cap, pal.sub, tx, r.rect.Y + 26.0f * s, tw, 14.0f * s);
     }
 
     switch (r.kind) {
@@ -697,6 +915,11 @@ struct Ui {
       case Kind::Slider:    DrawSlider(g, r); break;
       case Kind::Buttons:   DrawButtons(g, r, idx); break;
       case Kind::EditBox:   DrawEditFrame(g, r); break;
+      case Kind::Dropdown:  DrawDropdown(g, r, idx); break;
+      case Kind::Info:
+        Text(g, r.text ? r.text() : std::wstring(), *f_title, pal.sub, r.ctrl.X, r.ctrl.Y, r.ctrl.Width, r.ctrl.Height,
+             gp::StringAlignmentFar);
+        break;
     }
   }
 
@@ -748,6 +971,9 @@ struct Ui {
         }
       }
 
+      // Open dropdown list: on top of every row
+      if (open_dd >= 0 && open_dd < static_cast<int>(flat.size())) DrawDropdownList(g, *flat[open_dd], open_dd);
+
       // Scrollbar thumb
       if (max_scroll > 0.0f) {
         const gp::RectF t = ThumbRect();
@@ -785,6 +1011,16 @@ struct Ui {
       GetClientRect(hwnd, &rc);
       if (x >= static_cast<float>(rc.right) - 16.0f * s) { h.sb = true; return h; }
     }
+    if (open_dd >= 0 && open_dd < static_cast<int>(flat.size())) {   // the open list sits over the rows below it
+      const Row& dr = *flat[open_dd];
+      const gp::RectF pr = PopupRect(dr);
+      if (pr.Contains(x, y)) {
+        const int n = static_cast<int>(dr.options.size());
+        h.row = open_dd;
+        h.part = kPopupPart + (std::clamp)(static_cast<int>((y - pr.Y - 4.0f * s) / ItemH()), 0, n - 1);
+        return h;
+      }
+    }
     for (size_t i = 0; i < flat.size(); ++i) {
       const Row& r = *flat[i];
       if (!r.rect.Contains(x, y)) continue;
@@ -818,7 +1054,11 @@ struct Ui {
             }
           }
           break;
+        case Kind::Dropdown:
+          if (r.ctrl.Contains(x, y)) { h.row = static_cast<int>(i); h.part = 0; }
+          break;
         case Kind::EditBox:
+        case Kind::Info:
           break;
       }
       return h;
@@ -848,6 +1088,19 @@ struct Ui {
   void OnLButtonDown(float x, float y) {
     SetFocus(hwnd);   // takes focus away from a text box
     const Hot h = HitTest(x, y);
+    if (open_dd >= 0) {   // a click while a list is open picks an item or just closes it; it goes no further
+      if (h.row == open_dd && h.part >= kPopupPart) {
+        Row& dr = *flat[open_dd];
+        const int pick = h.part - kPopupPart;
+        open_dd = -1;
+        if (dr.get() != pick && dr.set) dr.set(pick);
+      } else {
+        open_dd = -1;
+      }
+      hot = HitTest(x, y);
+      InvalidateRect(hwnd, nullptr, FALSE);
+      return;
+    }
     if (h.tab >= 0) { SetPage(h.tab); return; }
     if (h.link) { OpenIni(); return; }
     if (h.sb) {
@@ -873,7 +1126,9 @@ struct Ui {
       case Kind::Buttons:
         if (h.part >= 0 && r.set) r.set(h.part);
         break;
-      case Kind::EditBox:   break;
+      case Kind::Dropdown:  open_dd = h.row; break;
+      case Kind::EditBox:
+      case Kind::Info:      break;
     }
     InvalidateRect(hwnd, nullptr, FALSE);
   }
@@ -923,6 +1178,8 @@ struct Ui {
 
         cfg = LoadSettings();
         autostart = IsAutostartEnabled();
+        RefreshCacheStats();
+        SetTimer(hwnd, kStatsTimer, 2000, nullptr);
         BuildPages();
         CreateEdits();
         ApplyTheme();
@@ -967,6 +1224,7 @@ struct Ui {
         return 0;
 
       case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE) CloseDropdown();
         if (ready && LOWORD(wp) != WA_INACTIVE && !edits_dirty) Reload();   // pick up manual edits of the ini
         return 0;
 
@@ -1037,6 +1295,7 @@ struct Ui {
 
       case WM_TIMER:
         if (wp == kEditTimer) CommitEdits();
+        else if (wp == kStatsTimer && page == 1) RefreshCacheStats();   // cheap; new songs are cached while this is open
         return 0;
 
       case WM_CTLCOLOREDIT: {
@@ -1055,7 +1314,10 @@ struct Ui {
       case WM_KEYDOWN: {
         const float page_px = view_bot - view_top - 24.0f * s;
         switch (wp) {
-          case VK_ESCAPE: PostMessageW(hwnd, WM_CLOSE, 0, 0); break;
+          case VK_ESCAPE:
+            if (open_dd >= 0) CloseDropdown();   // first Esc only closes the list
+            else PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            break;
           case VK_DOWN:   ScrollTo(scroll + 40.0f * s); break;
           case VK_UP:     ScrollTo(scroll - 40.0f * s); break;
           case VK_NEXT:   ScrollTo(scroll + page_px); break;
@@ -1068,6 +1330,7 @@ struct Ui {
       }
 
       case WM_CLOSE:
+        KillTimer(hwnd, kStatsTimer);
         CommitEdits();
         DestroyWindow(hwnd);
         return 0;
