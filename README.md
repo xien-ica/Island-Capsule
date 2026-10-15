@@ -88,3 +88,7 @@ Bugs, ideas, or questions → [open an issue](https://github.com/xien-ica/Island
 ## For developers
 
 Build instructions, design notes and lyrics internals are in the [`docs/`](docs/) folder, starting with [`docs/development.md`](docs/development.md).
+
+## License
+
+[MIT](LICENSE)

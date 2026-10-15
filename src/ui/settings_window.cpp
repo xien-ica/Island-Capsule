@@ -1118,7 +1118,12 @@ void OpenSettingsWindow(HINSTANCE hinst) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hinst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    // The capsule icon embedded in the exe (resource id 1, see resources/island_capsule.rc.in); generic icon if absent.
+    wc.hIcon = static_cast<HICON>(LoadImageW(hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON),
+                                             GetSystemMetrics(SM_CYICON), LR_SHARED));
+    if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIconSm = static_cast<HICON>(LoadImageW(hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                               GetSystemMetrics(SM_CYSMICON), LR_SHARED));
     wc.lpszClassName = kClass;
     if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
     registered = true;
@@ -1146,7 +1151,7 @@ void OpenSettingsWindow(HINSTANCE hinst) {
   ui->hinst = hinst;
   g_ui = ui;
 
-  HWND hwnd = CreateWindowExW(0, kClass, L"Island Capsule settings", style, x, y, w, h, nullptr, nullptr, hinst, ui);
+  HWND hwnd = CreateWindowExW(0, kClass, L"Island Capsule Settings", style, x, y, w, h, nullptr, nullptr, hinst, ui);
   if (!hwnd) {
     if (g_ui == ui) { g_ui = nullptr; delete ui; }   // (WM_NCDESTROY already freed it otherwise)
     return;

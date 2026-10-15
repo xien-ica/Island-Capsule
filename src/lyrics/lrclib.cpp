@@ -440,15 +440,19 @@ struct LyricsFetcher::Impl {
     }
 
     int requests = 0;
-    bool net_err = false;
+    bool net_err = false;           // could not reach the server (timeout / DNS / TLS): the connection is dropped
+    bool server_err = false;        // the server answered with a temporary failure (408 / 429 / 5xx)
     bool definitive_none = false;   // LRCLIB says: instrumental
     std::string found_lrc;
 
     auto fetch = [&](const std::string& pq) -> HttpResult {
-      if (cancelled() || requests >= kMaxRequestsPerTrack) return HttpResult{ -1, {} };   // -1 = skipped
+      // After the first temporary failure the remaining steps would only wait for the same timeout / error again
+      // (up to 4 more requests of 5-8 s each while offline), so the lookup stops there.
+      if (cancelled() || requests >= kMaxRequestsPerTrack || net_err || server_err) return HttpResult{ -1, {} };   // -1 = skipped
       ++requests;
       HttpResult h = http.Get(pq);
       if (h.status == 0) net_err = true;
+      else if (h.status == 408 || h.status == 429 || h.status >= 500) server_err = true;
       return h;
     };
 
@@ -522,8 +526,10 @@ struct LyricsFetcher::Impl {
         return out;
       }
     }
-    if (net_err && !definitive_none) {
-      out.network_error = true;   // not cached: try again next time this song plays
+    if ((net_err || server_err) && !definitive_none) {
+      // Not cached: try again next time this song plays. Only a clean "not found" answer (404 / no synced lyrics)
+      // is remembered below; an LRCLIB outage or rate limit (429 / 5xx) must not blank songs for 14 days.
+      out.network_error = true;
       return out;
     }
     out.write = use_disk;

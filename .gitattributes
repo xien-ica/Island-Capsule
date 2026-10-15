@@ -1,0 +1,4 @@
+# Normalize line endings: LF in the repository, whatever the editor writes in the working tree.
+* text=auto
+*.ico binary
+*.png binary

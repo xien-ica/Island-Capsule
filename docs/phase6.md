@@ -45,14 +45,16 @@ Hovering still opens the transport controls, but in lyrics mode they open **abov
 3. `GET /api/get?artist_name&track_name&album_name&duration` (no album on a 404 retry) →
    `GET /api/search?q=<artist title>` (best match: same title, matching artist, duration within 6 s, synced lyrics present) →
    same search with only the first artist (`A, B & C` → `A`) → YouTube-style `Artist - Title` split.
-   At most 5 requests per song; a newer song cancels the running lookup at its next step.
-4. `User-Agent: island-capsule/0.1 (https://github.com/YOUR-USER/island-capsule)` – **edit `kUserAgent` in `lrclib.cpp`**.
+   At most 5 requests per song; a newer song cancels the running lookup at its next step, and the lookup stops after
+   the first temporary failure (no connection, HTTP 408 / 429 / 5xx) instead of waiting for the same timeout again.
+4. `User-Agent: island-capsule/0.1 (https://github.com/xien-ica/Island-Capsule)` – set by `kUserAgent` in `lrclib.cpp`; change it if you fork.
    WinHTTP timeouts: resolve 5 s, connect 5 s, send 5 s, receive 8 s.
 
 **Cache** (`lyrics_cache`, on by default): `%APPDATA%\IslandCapsule\lyrics\<hash>.txt`, keyed by normalised artist +
 title + duration in seconds. All file IO runs on the lyrics worker thread.
 - "Found" is kept until evicted; "not found / instrumental" is cached too and retried after 14 days. A **network
-  error is not cached** (it is retried the next time that song plays).
+  error or a temporary server error (HTTP 408 / 429 / 5xx) is not cached** (it is retried the next time that song
+  plays); only a clean 404 / "no synced lyrics" answer is remembered.
 - **Duration tolerance**: on a miss the cache also looks for the same song at duration -1 s / +1 s (players round the
   length differently). Only found-lyrics entries count for the neighbours; "not found" is trusted for the exact key only.
 - **File format v2**: magic, key, `OK|NONE`, per-song offset, byte length, then the LRC text. A truncated / padded /

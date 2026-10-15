@@ -47,6 +47,26 @@ constexpr int kArtPx = 128;
 
 enum class Cmd { PlayPause, Next, Previous };
 
+// Blocking WinRT calls get a deadline: a stuck player must not freeze the worker (and with it play / pause,
+// track info and the cover) forever.
+constexpr std::chrono::milliseconds kPropsTimeout{ 4000 };     // media properties
+constexpr std::chrono::milliseconds kThumbTimeout{ 4000 };     // each cover-decode step
+constexpr std::chrono::milliseconds kCommandTimeout{ 2000 };   // play / pause / next / previous
+constexpr std::chrono::milliseconds kManagerTimeout{ 15000 };  // session manager at startup
+
+struct AsyncTimeout {};
+
+// Like op.get(), but gives up (cancelling the operation) after `timeout` by throwing AsyncTimeout. A failed
+// operation still throws its own error from GetResults(), exactly as get() would.
+template <typename Op>
+auto GetWithTimeout(Op const& op, std::chrono::milliseconds timeout) {
+  if (op.wait_for(timeout) == winrt::Windows::Foundation::AsyncStatus::Started) {
+    try { op.Cancel(); } catch (...) {}
+    throw AsyncTimeout{};
+  }
+  return op.GetResults();
+}
+
 std::wstring Lower(std::wstring s) {
   std::transform(s.begin(), s.end(), s.begin(),
                  [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
@@ -103,8 +123,8 @@ struct WakeState {
 std::shared_ptr<const ArtImage> DecodeThumbnail(wss::IRandomAccessStreamReference const& ref) {
   if (!ref) return nullptr;
   try {
-    auto stream = ref.OpenReadAsync().get();
-    auto decoder = wgi::BitmapDecoder::CreateAsync(stream).get();
+    auto stream = GetWithTimeout(ref.OpenReadAsync(), kThumbTimeout);
+    auto decoder = GetWithTimeout(wgi::BitmapDecoder::CreateAsync(stream), kThumbTimeout);
 
     const uint32_t w0 = decoder.PixelWidth();
     const uint32_t h0 = decoder.PixelHeight();
@@ -121,12 +141,12 @@ std::shared_ptr<const ArtImage> DecodeThumbnail(wss::IRandomAccessStreamReferenc
     tf.ScaledHeight(sh);
     tf.InterpolationMode(wgi::BitmapInterpolationMode::Fant);
 
-    auto provider = decoder.GetPixelDataAsync(
+    auto provider = GetWithTimeout(decoder.GetPixelDataAsync(
         wgi::BitmapPixelFormat::Bgra8,
         wgi::BitmapAlphaMode::Premultiplied,
         tf,
         wgi::ExifOrientationMode::IgnoreExifOrientation,
-        wgi::ColorManagementMode::DoNotColorManage).get();
+        wgi::ColorManagementMode::DoNotColorManage), kThumbTimeout);
 
     auto pixels = provider.DetachPixelData();
     if (pixels.size() != static_cast<size_t>(sw) * sh * 4) return nullptr;
@@ -349,7 +369,7 @@ struct MediaSession::Impl {
         info->has_session = true;
         info->source_app = std::wstring(s.SourceAppUserModelId());
 
-        auto props = s.TryGetMediaPropertiesAsync().get();
+        auto props = GetWithTimeout(s.TryGetMediaPropertiesAsync(), kPropsTimeout);
         info->title = std::wstring(props.Title());
         info->artist = std::wstring(props.Artist());
         info->album = std::wstring(props.AlbumTitle());
@@ -370,6 +390,8 @@ struct MediaSession::Impl {
           art_cache = DecodeThumbnail(props.Thumbnail());
         }
         info->art = art_cache;
+      } catch (AsyncTimeout const&) {
+        return;   // the player is not answering: keep the last snapshot (no blank flash); its next event refreshes again
       } catch (...) {
         // Player vanished mid-read; publish what we have.
       }
@@ -408,9 +430,9 @@ struct MediaSession::Impl {
       if (!s) continue;
       try {
         switch (c) {
-          case Cmd::PlayPause: (void)s.TryTogglePlayPauseAsync().get(); break;
-          case Cmd::Next:      (void)s.TrySkipNextAsync().get(); break;
-          case Cmd::Previous:  (void)s.TrySkipPreviousAsync().get(); break;
+          case Cmd::PlayPause: (void)GetWithTimeout(s.TryTogglePlayPauseAsync(), kCommandTimeout); break;
+          case Cmd::Next:      (void)GetWithTimeout(s.TrySkipNextAsync(), kCommandTimeout); break;
+          case Cmd::Previous:  (void)GetWithTimeout(s.TrySkipPreviousAsync(), kCommandTimeout); break;
         }
       } catch (...) {
       }
@@ -421,7 +443,7 @@ struct MediaSession::Impl {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
     try {
-      manager = Manager::RequestAsync().get();
+      manager = GetWithTimeout(Manager::RequestAsync(), kManagerTimeout);
       mgr_current_tok = manager.CurrentSessionChanged([w = wake](auto&&, auto&&) { w->Wake(true); });
       mgr_sessions_tok = manager.SessionsChanged([w = wake](auto&&, auto&&) { w->Wake(true); });
     } catch (...) {

@@ -20,6 +20,8 @@
 #endif
 #include <windows.h>
 
+#include "island_version.hpp"
+
 #include <wchar.h>
 
 #include <atomic>
@@ -171,7 +173,7 @@ int wmain(int argc, wchar_t** argv) {
   watcher.Poll(&settings);   // primes the watcher + loads the file
   apply_cli(settings);
 
-  Log(L"island-capsule loader v0.1.0 - Phases 0-6 (lyrics)\r\n");
+  Log(L"island-capsule loader v" ISLAND_VERSION_W L" - Phases 0-6 (lyrics)\r\n");
   Log(L"Settings: " + island::SettingsPath() + L"\r\n");
   Log(L"Keys: Space = play/pause, Left/Right = prev/next, Enter = quit\r\n\r\n");
 
@@ -244,21 +246,9 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring last_log_key;
   ULONGLONG next_settings_poll = GetTickCount64() + 1000;
 
-  bool running = true;
-  while (running) {
-    DWORD wait = MsgWaitForMultipleObjects(in_is_console ? 1 : 0, in_is_console ? &in : nullptr,
-                                           FALSE, pill.NextWaitMs(), QS_ALLINPUT);
-    if (in_is_console && wait == WAIT_OBJECT_0) {
-      running = HandleConsoleInput(in, media, pill);
-    }
-
-    MSG msg;
-    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-      if (msg.message == WM_QUIT) running = false;
-      TranslateMessage(&msg);
-      DispatchMessageW(&msg);
-    }
-
+  // Media + lyrics update work. Runs from the main loop AND from the pill's context-menu loop (the main loop is
+  // blocked while the menu is open), so track changes and lyrics keep showing while the menu is up.
+  auto service_updates = [&] {
     if (media_dirty.exchange(false)) {
       auto snap = media.Snapshot();
       pill.SetMedia(snap);
@@ -318,6 +308,25 @@ int wmain(int argc, wchar_t** argv) {
         if (line != lyr_last_log) { lyr_last_log = line; Log(line); }
       }
     }
+  };
+  pill.SetUpdateHandler(service_updates);
+
+  bool running = true;
+  while (running) {
+    DWORD wait = MsgWaitForMultipleObjects(in_is_console ? 1 : 0, in_is_console ? &in : nullptr,
+                                           FALSE, pill.NextWaitMs(), QS_ALLINPUT);
+    if (in_is_console && wait == WAIT_OBJECT_0) {
+      running = HandleConsoleInput(in, media, pill);
+    }
+
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+      if (msg.message == WM_QUIT) running = false;
+      TranslateMessage(&msg);
+      DispatchMessageW(&msg);
+    }
+
+    service_updates();
 
     const ULONGLONG now = GetTickCount64();
     if (now >= next_settings_poll) {

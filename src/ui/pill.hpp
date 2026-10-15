@@ -33,6 +33,9 @@ public:
 
   // Called on the UI thread when a transport button is clicked.
   void SetCommandHandler(std::function<void(PillCommand)> fn);
+  // Media / lyrics update work owned by the loader. The pill also calls it from its context-menu loop (the
+  // main loop is blocked while the menu is open), so track changes keep showing in the meantime.
+  void SetUpdateHandler(std::function<void()> fn);
   // Diagnostics (fullscreen hide, volume wheel): lines include their own "\r\n".
   void SetLogHandler(std::function<void(const std::wstring&)> fn);
 

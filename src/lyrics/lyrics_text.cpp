@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
 #include <cwctype>
 
 namespace island {
@@ -114,26 +115,35 @@ std::wstring Collapse(const std::wstring& s) {
   return out;
 }
 
+// True when `w` occurs in `l` as a whole word: a letter or digit right before or after the hit means it is part of a
+// longer word ("Featherweight" must not match "feat", "Monologue" must not match "mono"). `stem` words may continue
+// to the right ("remaster" -> "remastered", "lyric" -> "lyrics").
+bool HasWord(const std::wstring& l, const std::wstring& w, bool stem) {
+  for (size_t at = l.find(w); at != std::wstring::npos; at = l.find(w, at + 1)) {
+    const size_t end = at + w.size();
+    const bool left_ok = !std::iswalnum(w.front()) || at == 0 || !std::iswalnum(l[at - 1]);
+    const bool right_ok = stem || !std::iswalnum(w.back()) || end >= l.size() || !std::iswalnum(l[end]);
+    if (left_ok && right_ok) return true;
+  }
+  return false;
+}
+
 // Words that make a bracketed group / dash suffix pure video-or-release noise.
 bool IsNoise(const std::wstring& text) {
-  const std::wstring l = Lower(text);
-  static const wchar_t* kWords[] = {
-    L"official", L"video", L"audio", L"lyric", L"visuali", L"remaster", L"music video", L"explicit",
-    L"clean version", L"hd", L"hq", L"4k", L"1080p", L"m/v", L"full song", L"full version", L"topic",
-    L"feat", L"ft.", L"featuring", L"with ", L"prod.", L"bonus track", L"deluxe", L"mono", L"stereo",
+  const std::wstring l = Trim(Lower(text));
+  struct Word { const wchar_t* w; bool stem; };
+  static const Word kWords[] = {
+    { L"official", false }, { L"video", false }, { L"audio", false }, { L"lyric", true }, { L"visuali", true },
+    { L"remaster", true }, { L"music video", false }, { L"explicit", false }, { L"clean version", false },
+    { L"hd", false }, { L"hq", false }, { L"4k", false }, { L"1080p", false }, { L"m/v", false },
+    { L"full song", false }, { L"full version", false }, { L"topic", false }, { L"feat", false },
+    { L"ft.", false }, { L"featuring", false }, { L"prod.", false }, { L"bonus track", false },
+    { L"deluxe", false }, { L"mono", false }, { L"stereo", false },
   };
-  for (const wchar_t* w : kWords) {
-    const std::wstring ws = w;
-    const size_t at = l.find(ws);
-    if (at == std::wstring::npos) continue;
-    // short tokens ("hd", "hq", "mv") must be whole words, otherwise "Shades" would match
-    if (ws.size() <= 3) {
-      const bool left_ok = at == 0 || !std::iswalnum(l[at - 1]);
-      const bool right_ok = at + ws.size() >= l.size() || !std::iswalnum(l[at + ws.size()]);
-      if (!(left_ok && right_ok)) continue;
-    }
-    return true;
-  }
+  for (const Word& k : kWords)
+    if (HasWord(l, k.w, k.stem)) return true;
+  // "(with Brandon)" is a credit, but "with" inside a title ("Walk with Me") is not noise: only at the start.
+  if (l.compare(0, 5, L"with ") == 0) return true;
   return l == L"mv";
 }
 

@@ -10,6 +10,10 @@ if(NOT WIN32)
 endif()
 
 if(MSVC)
+  # Link the C/C++ runtime statically (/MT, /MTd in Debug): island_loader.exe is then one self-contained file that
+  # runs on a PC without the Visual C++ Redistributable. Must be set before the target is created.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
   # NOTE: no /await. C++/WinRT + C++20 uses the standard <coroutine>.
   # /FS serializes PDB writes so parallel cl.exe processes don't collide on vc145.pdb (error C1041).
   add_compile_options(/EHsc /W3 /permissive- /Zc:__cplusplus /utf-8 /FS)
@@ -33,6 +37,9 @@ add_executable(island_loader
   src/lyrics/lyrics_text.cpp
   src/media/gsmtc.cpp
   src/ui/pill.cpp
+  src/ui/pill_input.cpp
+  src/ui/pill_menu.cpp
+  src/ui/pill_render.cpp
   src/ui/dwtext.cpp
   src/ui/transport.cpp
   src/ui/tray.cpp
@@ -43,7 +50,20 @@ add_executable(island_loader
   src/theme/brushes.cpp
 )
 
-target_include_directories(island_loader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Exe icon + version info (Properties > Details). The version comes from project(... VERSION x.y.z) above,
+# so bump it in one place. The .rc is generated into the build tree.
+if(MSVC)
+  enable_language(RC)
+  set(ISLAND_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/resources/island_capsule.ico")
+  configure_file(resources/island_capsule.rc.in ${CMAKE_BINARY_DIR}/island_capsule.rc @ONLY)
+  target_sources(island_loader PRIVATE ${CMAKE_BINARY_DIR}/island_capsule.rc)
+  set_source_files_properties(${CMAKE_BINARY_DIR}/island_capsule.rc PROPERTIES OBJECT_DEPENDS ${ISLAND_ICON_PATH})
+endif()
+
+# Version header (ISLAND_VERSION_W) generated from the project version, so the startup log never goes stale.
+configure_file(src/version.hpp.in ${CMAKE_BINARY_DIR}/generated/island_version.hpp @ONLY)
+
+target_include_directories(island_loader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/generated)
 
 target_compile_definitions(island_loader PRIVATE UNICODE _UNICODE)
 

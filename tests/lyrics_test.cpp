@@ -209,6 +209,19 @@ int main() {
   CHECKW(CleanTitle(L"Song - 2011 Remaster"), L"Song");
   CHECKW(CleanTitle(L"Dance with Me"), L"Dance with Me");
   CHECKW(CleanTitle(L"(Official Video)"), L"(Official Video)");   // never returns empty
+  // noise words must be whole words: a bracketed subtitle that merely CONTAINS one stays
+  CHECKW(CleanTitle(L"Walk Away (Walk with Me)"), L"Walk Away (Walk with Me)");
+  CHECKW(CleanTitle(L"Dancing (Featherweight)"), L"Dancing (Featherweight)");
+  CHECKW(CleanTitle(L"Song (Monologue)"), L"Song (Monologue)");
+  CHECKW(CleanTitle(L"Song (Topical Storm)"), L"Song (Topical Storm)");
+  CHECKW(CleanTitle(L"Song (Audiotree Live)"), L"Song (Audiotree Live)");
+  // ...while real noise, including stems and plurals, is still removed
+  CHECKW(CleanTitle(L"Song (Remastered)"), L"Song");
+  CHECKW(CleanTitle(L"Song (Lyrics)"), L"Song");
+  CHECKW(CleanTitle(L"Song (Visualizer)"), L"Song");
+  CHECKW(CleanTitle(L"Song (Featuring Someone)"), L"Song");
+  CHECKW(CleanTitle(L"Song (Official Audio)"), L"Song");
+  CHECKW(CleanTitle(L"Song (Deluxe Edition)"), L"Song");
   CHECKW(CleanArtist(L"Queen - Topic"), L"Queen");
   CHECKW(CleanArtist(L"ColdplayVEVO"), L"Coldplay");
   CHECKW(CleanArtist(L"A feat. B"), L"A");
