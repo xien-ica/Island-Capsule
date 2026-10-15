@@ -45,12 +45,11 @@ Keyboard shortcuts only work while the mouse is over the capsule, so they never 
 
 ## Lyrics
 
-- Lyrics are fetched from [LRCLIB](https://lrclib.net) (free, no account required).
-- Toggle with `Ctrl+L`. The capsule follows the music through pause, seek and skip.
-- No lyrics available? It falls back to title + artist for that song and automatically shows lyrics again on the next track that has them.
-- Timing a bit early/late? Hover and use `Ctrl+Left` / `Ctrl+Right`. The offset is remembered per song. For a global offset (e.g. Bluetooth latency) use **Lyrics offset** in Settings.
-- Found lyrics are cached locally (optional; can be turned off). Cache is capped at ~16 MB.
-- Some players do not report playback position — lyrics cannot be shown for those sessions.
+- Synced lyrics come from [LRCLIB](https://lrclib.net) (free, no account). Press `Ctrl+L` over the capsule to toggle them.
+- No lyrics for a song? The capsule shows title + artist and switches back to lyrics on the next song that has them.
+- Timing off? Hover and use `Ctrl+Left` / `Ctrl+Right` (remembered per song), or set a global **Lyrics offset** in Settings.
+- Found lyrics are cached on disk (optional) so replays work offline. Settings → Behavior → Lyrics shows the cache size.
+- Problems or missing lyrics? See [Limitations](#limitations).
 
 ## Settings
 
@@ -65,6 +64,35 @@ All options are also stored in the plain-text file
 (you can edit it while the app is running).  
 To disable every animation at once, set `reduced_motion=true`.
 
+## Limitations
+
+Lyrics come from the free, community-run [LRCLIB](https://lrclib.net) service, so they are only as complete and available as that service.
+
+### Rate limiting (HTTP 429)
+- LRCLIB limits how fast a client can ask. Skipping through many tracks quickly can trigger “429 Too Many Requests”.
+- The capsule then pauses lookups (at least 5 s, doubling after each refusal up to 2 min, never shorter than the server’s `Retry-After`) and retries the current track up to 3 times by itself.
+- If it still fails, it tries again the next time that track plays. Wait a moment or skip more slowly. Songs already cached are not affected.
+
+### Server problems
+- If LRCLIB is down, overloaded (5xx / 503) or times out, lyrics are unavailable until it recovers. The capsule keeps showing title + artist.
+- A temporary outage is not remembered as “no lyrics”.
+
+### Missing lyrics
+- Not every song has synced lyrics. Newer, niche, regional and independent releases, remixes and live versions are often missing, or only have plain (un-timed) lyrics, which are not shown.
+- Songs with no match are remembered as “no lyrics” for up to 14 days so they are not requested on every play.
+
+### Matching and timing
+- Lookups use the title, artist, album and duration your player reports. Odd tags (extra “feat.”, “Remastered”, translated titles) can cause no match or the wrong version.
+- Synced lyrics are user-made, so some run slightly early or late. Use `Ctrl+Left` / `Ctrl+Right` or **Lyrics offset**.
+- Players that do not report playback position cannot show lyrics at all.
+
+### Offline and cache
+- New songs need an internet connection; only cached songs work offline. Nothing is fetched while **Synced lyrics** is off.
+- The disk cache holds up to 2000 files / ~16 MB; the oldest are removed first. Clearing the cache also clears your per-song timing nudges.
+
+### Platform
+- Island Capsule was only created and tested on Windows 11. It has not been tested on Windows 10, so it may or may not work there.
+
 ## Privacy
 
 - The **only** network request is the lyrics lookup (title, artist, album, duration → lrclib.net). With lyrics disabled there are zero network calls.
@@ -77,6 +105,7 @@ To disable every animation at once, set `reduced_motion=true`.
 - **Tray icon missing** — click the **^** overflow arrow next to the clock. You can drag the icon onto the taskbar.
 - **Disappears in games / fullscreen video** — that’s the **Hide in fullscreen** option. Turn it off under Behavior if you want it always visible.
 - **Player not detected** — some apps use unusual process names. Switch Media settings to “all apps”, or open an issue with the app name.
+- **Lyrics don’t appear / “network error” / HTTP 429** — LRCLIB is rate limiting you or is busy; the capsule retries on its own (see [Limitations](#limitations)). Wait a few seconds and avoid skipping tracks rapidly. If a song never gets lyrics, it probably isn’t in LRCLIB yet.
 - **Started twice** — a new instance automatically closes the previous one.
 - **Quit** — right-click capsule or tray icon → **Quit**.
 - **Uninstall** — quit, untick Start with Windows, then delete the program folder and `%APPDATA%\IslandCapsule`.
