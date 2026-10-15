@@ -8,7 +8,7 @@
 // Command-line options override the file.
 //
 // Hover the pill to reveal the transport strip (prev / play-pause / next).
-// Ctrl+L while hovering the capsule toggles lyrics mode (synced lyrics from lrclib.net, see docs/phase6.md).
+// Ctrl+L while hovering the capsule toggles lyrics mode (synced lyrics from lrclib.net, see src/lyrics/lrclib.hpp).
 // Console keys:  Space = play/pause   Left = previous   Right = next
 //                Enter / Esc / Q = quit
 
@@ -284,7 +284,7 @@ int wmain(int argc, wchar_t** argv) {
           if (key != lyr_pending_key) {
             lyr_pending_key = key;   // new track (or the player corrected the duration): let it settle first
             lyr_pending_since = t;
-          } else if (t - lyr_pending_since >= 300) {
+          } else if (t - lyr_pending_since >= 600) {   // skipping through songs must not fire one lookup per song
             island::LyricsRequest rq;
             rq.track_id = id;
             rq.title = snap->title;
@@ -298,11 +298,13 @@ int wmain(int argc, wchar_t** argv) {
       if (lyrics_dirty.exchange(false)) {
         auto ls = lyrics.Snapshot();
         pill.SetLyrics(ls);
-        const wchar_t* st = ls->state == island::LyricsState::Loading ? L"looking up"
+        const wchar_t* st = ls->state == island::LyricsState::Loading ? L"requested (local cache first, then LRCLIB)"
                           : ls->state == island::LyricsState::Ready ? L"found"
                           : ls->state == island::LyricsState::NotFound ? (ls->network_error ? L"network error" : L"none")
                           : L"idle";
         const std::wstring line = L"[lyrics] " + std::wstring(st) +
+                                  (ls->state == island::LyricsState::Loading ? L" (" + std::to_wstring(ls->duration_sec) + L" s)"
+                                                                             : std::wstring()) +
                                   (ls->state == island::LyricsState::Ready && ls->lines
                                        ? L" (" + std::to_wstring(ls->lines->size()) + L" lines)" : L"") + L"\r\n";
         if (line != lyr_last_log) { lyr_last_log = line; Log(line); }
