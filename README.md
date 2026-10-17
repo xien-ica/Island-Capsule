@@ -95,7 +95,7 @@ Lyrics come from the free, community-run [LRCLIB](https://lrclib.net) service, s
 
 ## Privacy
 
-- The **only** network request is the lyrics lookup (title, artist, album, duration → lrclib.net). With lyrics disabled there are zero network calls.
+- The **only** network request is the lyrics lookup (title, artist, album, duration → lrclib.net). Requests also carry Island Capsule's public LRCLIB application ID (the `Lrclib-App-Id` header), which identifies the app, not you. With lyrics disabled there are zero network calls.
 - The visualizer listens to system audio solely for animation. Nothing is recorded or stored. Turn off **React to audio** if you prefer.
 - Local data lives in `%APPDATA%\IslandCapsule` (settings + optional lyrics cache). You can delete the `lyrics` folder at any time.
 
