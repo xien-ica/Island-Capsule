@@ -29,6 +29,7 @@ option(ISLAND_CONSOLE "Build with a console window" ON)
 # + visualizer + settings)
 add_executable(island_loader
   src/loader.cpp
+  src/crash.cpp
   src/audio/spectrum.cpp
   src/audio/volume.cpp
   src/lyrics/lrc.cpp
