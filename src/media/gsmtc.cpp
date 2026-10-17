@@ -188,6 +188,7 @@ void ReadTimeline(Session const& s, MediaInfo& info) {
   info.playback_rate = 1.0;
   try {
     auto tl = s.GetTimelineProperties();
+    if (!tl) return;   // null while the session is closing (see Refresh): using it would be an access violation
     const int64_t start = duration_cast<milliseconds>(tl.StartTime()).count();
     const int64_t end = duration_cast<milliseconds>(tl.EndTime()).count();
     int64_t pos = duration_cast<milliseconds>(tl.Position()).count();
@@ -195,8 +196,10 @@ void ReadTimeline(Session const& s, MediaInfo& info) {
 
     double rate = 1.0;
     try {
-      auto r = s.GetPlaybackInfo().PlaybackRate();
-      if (r) rate = r.Value();
+      if (auto pi = s.GetPlaybackInfo()) {
+        auto r = pi.PlaybackRate();
+        if (r) rate = r.Value();
+      }
     } catch (...) {
     }
     if (!(rate > 0.05 && rate < 8.0)) rate = 1.0;
@@ -279,7 +282,10 @@ struct MediaSession::Impl {
         if (!matches(s)) continue;
         if (!first) first = s;
         try {
-          if (!playing && s.GetPlaybackInfo().PlaybackStatus() == PlaybackStatus::Playing) playing = s;
+          if (!playing) {
+            auto pi = s.GetPlaybackInfo();   // can be null while a session is closing
+            if (pi && pi.PlaybackStatus() == PlaybackStatus::Playing) playing = s;
+          }
         } catch (...) {
         }
       }
@@ -369,17 +375,24 @@ struct MediaSession::Impl {
         info->has_session = true;
         info->source_app = std::wstring(s.SourceAppUserModelId());
 
+        // A session that is closing (e.g. while tracks are skipped quickly) can hand back a NULL object together with
+        // S_OK. C++/WinRT does not check for that, and using the null object is an access violation, which catch (...)
+        // does not catch: the whole app died here. Treat it like a player that is not answering: keep the last
+        // snapshot, the session event that follows refreshes again.
         auto props = GetWithTimeout(s.TryGetMediaPropertiesAsync(), kPropsTimeout);
+        auto pb = s.GetPlaybackInfo();
+        if (!props || !pb) return;
+
         info->title = std::wstring(props.Title());
         info->artist = std::wstring(props.Artist());
         info->album = std::wstring(props.AlbumTitle());
 
-        auto pb = s.GetPlaybackInfo();
         info->is_playing = pb.PlaybackStatus() == PlaybackStatus::Playing;
-        auto ctl = pb.Controls();
-        info->can_play_pause = ctl.IsPlayPauseToggleEnabled() || ctl.IsPlayEnabled() || ctl.IsPauseEnabled();
-        info->can_next = ctl.IsNextEnabled();
-        info->can_prev = ctl.IsPreviousEnabled();
+        if (auto ctl = pb.Controls()) {
+          info->can_play_pause = ctl.IsPlayPauseToggleEnabled() || ctl.IsPlayEnabled() || ctl.IsPauseEnabled();
+          info->can_next = ctl.IsNextEnabled();
+          info->can_prev = ctl.IsPreviousEnabled();
+        }
         if (tl_enabled.load()) ReadTimeline(s, *info);
 
         // Only decode the thumbnail when the track changed, or when the previous
