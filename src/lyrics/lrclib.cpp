@@ -36,6 +36,9 @@ namespace {
 // LRCLIB asks clients to identify themselves: app name, version, project link. The version follows the CMake project version.
 constexpr wchar_t kUserAgent[] = L"island-capsule/" ISLAND_VERSION_W L" (https://github.com/xien-ica/Island-Capsule)";
 constexpr wchar_t kHost[] = L"lrclib.net";
+// Application ID from the LRCLIB developer portal (https://lrclib.net/developers). It is public and self-asserted, not a
+// credential, and is sent with every request so LRCLIB can apply the registered application's higher rate limit.
+constexpr wchar_t kAppIdHeader[] = L"Lrclib-App-Id: xmkerqvK5edSV7Tu4jCKARC69iWJJuYztN7eSnaoqMg";
 constexpr size_t kMaxBody = 4u * 1024u * 1024u;
 constexpr int kMaxRequestsPerTrack = 4;   // worst case per lookup: exact get, search, search by first artist, "Artist - Title" search
 // Politeness towards LRCLIB (a free, donation-run service). The client throttles ITSELF so it never depends on the server's limiter:
@@ -228,7 +231,7 @@ struct Http {
                                        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (!req) { r.err = GetLastError(); return r; }
 
-    bool ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+    bool ok = WinHttpSendRequest(req, kAppIdHeader, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
               WinHttpReceiveResponse(req, nullptr);
     if (!ok) r.err = GetLastError();
     if (ok) {
