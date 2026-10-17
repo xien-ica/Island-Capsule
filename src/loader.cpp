@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "crash.hpp"
 #include "lyrics/lrclib.hpp"
 #include "media/gsmtc.hpp"
 #include "settings/settings.hpp"
@@ -134,6 +135,9 @@ HANDLE TakeSingleInstance() {
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
+  // First thing: if the process dies from an unhandled exception, write %APPDATA%\IslandCapsule\crash.log + crash.dmp.
+  island::InstallCrashHandler();
+
   // Real pixel coordinates (no DPI virtualisation) so we line up with the taskbar.
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 

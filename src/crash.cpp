@@ -11,6 +11,7 @@
 #include <shlobj.h>
 
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 
 #include "island_version.hpp"
