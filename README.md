@@ -56,7 +56,7 @@ Keyboard shortcuts only work while the mouse is over the capsule, so they never 
 Right-click the capsule or tray icon → **Open settings**. Changes apply immediately.
 
 - **Capsule** — position (left / center / right), margin, max width, control-open side, visualizer style (ticks / wave / glow / off). **React to audio** makes the visualizer follow real sound; **Only the playing app** limits it to the app that owns the current media (Windows 11 / Windows 10 build 20348+).
-- **Behavior** — start with Windows, hide in fullscreen, collapse when paused, volume scroll & step size, Shift+scroll skipping, click actions, lyrics options, motion effects.
+- **Behavior** — start with Windows, hide in fullscreen, collapse when paused, volume scroll, step size and **Only the playing app** (the wheel changes just that app's volume, not the system's), Shift+scroll skipping, click actions, lyrics options, motion effects.
 - **Media** — follow all media sessions, or only the executables you list (e.g. `Spotify.exe, chrome.exe`).
 
 All options are also stored in the plain-text file  
@@ -105,6 +105,8 @@ Lyrics come from the free, community-run [LRCLIB](https://lrclib.net) service, s
 - **Tray icon missing** — click the **^** overflow arrow next to the clock. You can drag the icon onto the taskbar.
 - **Disappears in games / fullscreen video** — that’s the **Hide in fullscreen** option. Turn it off under Behavior if you want it always visible.
 - **Player not detected** — some apps use unusual process names. Switch Media settings to “all apps”, or open an issue with the app name.
+- **Scrolling doesn’t change the volume** — with **Only the playing app** on, the wheel changes that app’s own volume, which Windows only lists after the app has played sound once. Play something for a moment and try again, or turn the option off to control the system volume instead. The app also has to be recognisable from its media session name (a few players, e.g. Firefox, report an opaque name).
+- **Visualizer moves to the wrong audio / stays still** — with **Only the playing app** on, it follows just the app shown in the capsule (Windows 11). If the player’s name can’t be matched to a running program it uses all system audio instead. The bars keep moving when you turn the app’s volume down, because they read the sound before the volume is applied.
 - **Lyrics don’t appear / “network error” / HTTP 429** — LRCLIB is rate limiting you or is busy; the capsule retries on its own (see [Limitations](#limitations)). Wait a few seconds and avoid skipping tracks rapidly. If a song never gets lyrics, it probably isn’t in LRCLIB yet.
 - **Started twice** — a new instance automatically closes the previous one.
 - **Quit** — right-click capsule or tray icon → **Quit**.
