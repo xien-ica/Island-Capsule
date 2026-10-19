@@ -677,6 +677,7 @@ void PillWindow::Impl::Tick() {
   const bool lyric_changed = UpdateLyrics();
   const bool major = Animate(dt, want_hidden) || lyric_changed;
   // Audio capture only while it can be seen: visualizer on, the setting on, a session playing, capsule visible.
+  audio.SetTargetApp(cfg.visualizer_app_only ? media->source_app : std::wstring());
   audio.SetActive(cfg.visualizer_audio && viz.Enabled() && media->has_session && media->is_playing && !want_hidden);
   const bool viz_changed = viz.Update(dt);
   if (viz_changed) pending_viz = true;

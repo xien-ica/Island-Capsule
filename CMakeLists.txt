@@ -30,6 +30,7 @@ option(ISLAND_CONSOLE "Build with a console window" ON)
 add_executable(island_loader
   src/loader.cpp
   src/crash.cpp
+  src/audio/app_audio.cpp
   src/audio/spectrum.cpp
   src/audio/volume.cpp
   src/lyrics/lrc.cpp
@@ -70,7 +71,7 @@ target_compile_definitions(island_loader PRIVATE UNICODE _UNICODE)
 
 target_link_libraries(island_loader PRIVATE
   user32 gdi32 shcore shell32 advapi32 ole32 msimg32 gdiplus dwmapi d2d1 dwrite
-  windowsapp runtimeobject winhttp
+  windowsapp runtimeobject winhttp mmdevapi
 )
 
 if(MSVC AND NOT ISLAND_CONSOLE)

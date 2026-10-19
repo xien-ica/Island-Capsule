@@ -1,5 +1,7 @@
 #include "audio/volume.hpp"
 
+#include "audio/app_audio.hpp"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -13,7 +15,6 @@
 #include <wrl/client.h>
 
 #include <algorithm>
-#include <cwctype>
 #include <vector>
 
 #pragma comment(lib, "ole32.lib")
@@ -21,47 +22,6 @@
 namespace island {
 
 using Microsoft::WRL::ComPtr;
-
-namespace {
-
-std::wstring Lower(std::wstring s) {
-  std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-  return s;
-}
-
-// Process id -> lower-case executable name without the extension ("C:\...\Spotify.exe" -> "spotify").
-// Empty when the process cannot be opened (protected / already gone).
-std::wstring ExeStem(DWORD pid) {
-  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (!h) return {};
-  wchar_t buf[MAX_PATH] = {};
-  DWORD n = MAX_PATH;
-  std::wstring out;
-  if (QueryFullProcessImageNameW(h, 0, buf, &n)) {
-    std::wstring p(buf, n);
-    const size_t slash = p.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) p.erase(0, slash + 1);
-    const size_t dot = p.find_last_of(L'.');
-    if (dot != std::wstring::npos) p.erase(dot);
-    out = Lower(p);
-  }
-  CloseHandle(h);
-  return out;
-}
-
-// Does the media session's AppUserModelId belong to the process whose executable stem is `stem`?
-// AUMIDs come in several shapes ("Spotify.exe", "Chrome", "MSEdge",
-// "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"), so this is a loose, case-insensitive containment check in
-// either direction. Very short names are ignored so "a" cannot match everything.
-bool AppMatches(const std::wstring& app_lower, const std::wstring& stem) {
-  if (stem.size() < 3 || app_lower.empty()) return false;
-  if (app_lower.find(stem) != std::wstring::npos) return true;
-  std::wstring bare = app_lower;
-  if (bare.size() > 4 && bare.compare(bare.size() - 4, 4, L".exe") == 0) bare.erase(bare.size() - 4);
-  return bare.size() >= 3 && stem.find(bare) != std::wstring::npos;
-}
-
-} // namespace
 
 struct SystemVolume::Impl {
   bool com_inited = false;
@@ -133,7 +93,7 @@ bool SystemVolume::Nudge(float delta, float* level, bool* muted) {
 
 bool SystemVolume::NudgeApp(const std::wstring& source_app, float delta, float* level, bool* muted) {
   Impl& d = *impl_;
-  const std::wstring app = Lower(source_app);
+  const std::wstring app = LowerW(source_app);
   if (app.empty()) return false;
 
   // Audio sessions belong to the default playback device. They are enumerated afresh on every call (a wheel
@@ -167,7 +127,7 @@ bool SystemVolume::NudgeApp(const std::wstring& source_app, float delta, float* 
 
     DWORD pid = 0;
     if (FAILED(ctl2->GetProcessId(&pid)) || pid == 0) continue;
-    if (!AppMatches(app, ExeStem(pid))) continue;
+    if (!AppMatchesExe(app, ExeStem(pid))) continue;
 
     Hit h;
     if (FAILED(ctl.As(&h.vol)) || !h.vol) continue;

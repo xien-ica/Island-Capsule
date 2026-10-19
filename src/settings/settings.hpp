@@ -18,6 +18,7 @@ struct Settings {
   int max_width = 320;               // logical px, clamped to 200..600
   VizStyle visualizer = VizStyle::Ticks;
   bool visualizer_audio = true;      // visualizer follows the real audio (WASAPI loopback); false => synthetic motion
+  bool visualizer_app_only = true;   // ... and only the audio of the app that owns the current media, not the whole system mix
   bool hide_fullscreen = true;       // fade the capsule out while a fullscreen app / game / video is up
   bool scroll_volume = true;         // mouse wheel over the capsule changes the system volume
   int scroll_step = 2;               // percent per wheel notch (1..10)

@@ -13,7 +13,7 @@ It shows what’s currently playing, lets you control playback with hover or scr
 ## Features
 
 - **Now playing** — album art, title and artist, tinted by the album’s colors. Long titles scroll.
-- **Live visualizer** — reacts to the real audio coming from your speakers (or a simple animation if you prefer).
+- **Live visualizer** — reacts to the real audio of the app that is playing (or to all system audio, or a simple animation, if you prefer).
 - **Hover controls** — previous / play-pause / next slide out of the capsule.
 - **Scroll for volume** — mouse wheel over the capsule changes the volume of the app that is playing (or the system volume, if you turn that off in Settings).
 - **Synced lyrics** — `Ctrl+L` over the capsule switches to the current lyric line (sourced from [LRCLIB](https://lrclib.net)).
@@ -55,7 +55,7 @@ Keyboard shortcuts only work while the mouse is over the capsule, so they never 
 
 Right-click the capsule or tray icon → **Open settings**. Changes apply immediately.
 
-- **Capsule** — position (left / center / right), margin, max width, control-open side, visualizer style (ticks / wave / glow / off). **React to audio** makes the visualizer follow real sound.
+- **Capsule** — position (left / center / right), margin, max width, control-open side, visualizer style (ticks / wave / glow / off). **React to audio** makes the visualizer follow real sound; **Only the playing app** limits it to the app that owns the current media (Windows 11 / Windows 10 build 20348+).
 - **Behavior** — start with Windows, hide in fullscreen, collapse when paused, volume scroll & step size, Shift+scroll skipping, click actions, lyrics options, motion effects.
 - **Media** — follow all media sessions, or only the executables you list (e.g. `Spotify.exe, chrome.exe`).
 
@@ -96,7 +96,7 @@ Lyrics come from the free, community-run [LRCLIB](https://lrclib.net) service, s
 ## Privacy
 
 - The **only** network request is the lyrics lookup (title, artist, album, duration → lrclib.net). Requests also carry Island Capsule's public LRCLIB application ID (the `Lrclib-App-Id` header), which identifies the app, not you. With lyrics disabled there are zero network calls.
-- The visualizer listens to system audio solely for animation. Nothing is recorded or stored. Turn off **React to audio** if you prefer.
+- The visualizer listens to audio (the playing app's, or the system's) solely for animation. Nothing is recorded or stored. Turn off **React to audio** if you prefer.
 - Local data lives in `%APPDATA%\IslandCapsule` (settings + optional lyrics cache). You can delete the `lyrics` folder at any time.
 
 ## Troubleshooting

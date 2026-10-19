@@ -341,8 +341,10 @@ struct Ui {
       viz.rows.push_back(SegRow(L"Style", L"", { L"Off", L"Ticks", L"Wave", L"Glow" }, 54.0f,
           [this] { return static_cast<int>(cfg.visualizer); },
           [this](int v) { cfg.visualizer = static_cast<VizStyle>(v); SaveSettingValue(L"visualizer", VizName(cfg.visualizer)); }));
-      viz.rows.push_back(BoolRow(L"React to audio", L"Follows what is playing (system audio loopback, nothing is recorded)",
+      viz.rows.push_back(BoolRow(L"React to audio", L"Follows what is playing (audio loopback, nothing is recorded)",
                                  &Settings::visualizer_audio, L"visualizer_audio"));
+      viz.rows.push_back(BoolRow(L"Only the playing app", L"Ignores sound from other apps (Windows 11 / 10 build 20348+)",
+                                 &Settings::visualizer_app_only, L"visualizer_app_only"));
       pages[0].push_back(std::move(viz));
     }
 

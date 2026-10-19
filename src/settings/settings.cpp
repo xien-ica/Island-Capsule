@@ -126,6 +126,7 @@ Settings LoadSettings() {
   VizStyle v;
   if (ParseViz(ReadString(p, L"visualizer", L"ticks"), &v)) s.visualizer = v;
   s.visualizer_audio = ReadBool(p, L"visualizer_audio", s.visualizer_audio);
+  s.visualizer_app_only = ReadBool(p, L"visualizer_app_only", s.visualizer_app_only);
 
   s.hide_fullscreen = ReadBool(p, L"hide_fullscreen", s.hide_fullscreen);
   s.scroll_volume = ReadBool(p, L"scroll_volume", s.scroll_volume);
@@ -187,6 +188,8 @@ bool EnsureSettingsFile() {
       "; true: the visualizer follows the real audio (captures what the default playback device plays, nothing is\r\n"
       "; recorded or stored); false: synthetic motion, no audio capture\r\n"
       "visualizer_audio=true\r\n"
+      "; true = the visualizer only reacts to the app that is playing (needs Windows 11 / 10 build 20348+); false = all system audio\r\n"
+      "visualizer_app_only=true\r\n"
       "; which side the transport strip opens on: left | right\r\n"
       "strip_side=right\r\n"
       "; paused => the capsule collapses to just the visualizer (hover reopens it)\r\n"

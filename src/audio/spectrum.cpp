@@ -1,5 +1,7 @@
 #include "audio/spectrum.hpp"
 
+#include "audio/app_audio.hpp"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,17 +12,46 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
+#include <wrl/implements.h>
+#if __has_include(<audioclientactivationparams.h>)
+#include <audioclientactivationparams.h>
+#else
+// Older Windows SDKs: the process-loopback activation parameters (documented layout, Windows 10 build 20348+).
+typedef enum {
+  AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT = 0,
+  AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK = 1,
+} AUDIOCLIENT_ACTIVATION_TYPE;
+typedef enum {
+  PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE = 0,
+  PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE = 1,
+} PROCESS_LOOPBACK_MODE;
+typedef struct {
+  DWORD TargetProcessId;
+  PROCESS_LOOPBACK_MODE ProcessLoopbackMode;
+} AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS;
+typedef struct {
+  AUDIOCLIENT_ACTIVATION_TYPE ActivationType;
+  union {
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS ProcessLoopbackParams;
+  };
+} AUDIOCLIENT_ACTIVATION_PARAMS;
+#endif
+#ifndef VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK
+#define VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK L"VAD\\Process_Loopback"
+#endif
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "mmdevapi.lib")
 
 namespace island {
 
@@ -185,7 +216,22 @@ struct Analyzer {
   }
 };
 
-// One open loopback stream on the default playback device.
+// Completion handler for ActivateAudioInterfaceAsync. It must be agile (FtmBase), the callback arrives on a
+// system thread; the capture thread just waits on `done`.
+class ActivationHandler
+    : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+                                          Microsoft::WRL::FtmBase, IActivateAudioInterfaceCompletionHandler> {
+public:
+  HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  ~ActivationHandler() { if (done) CloseHandle(done); }
+  STDMETHOD(ActivateCompleted)(IActivateAudioInterfaceAsyncOperation*) override {
+    SetEvent(done);
+    return S_OK;
+  }
+};
+
+// One open loopback stream: either the whole default playback device (system mix) or, on Windows 10 build 20348+ /
+// Windows 11, only one process tree (the app that owns the current media).
 struct Capture {
   ComPtr<IAudioClient> client;
   ComPtr<IAudioCaptureClient> cap;
@@ -195,6 +241,10 @@ struct Capture {
   int bits = 32;
   ULONGLONG checked_at = 0;
   std::vector<float> mono;
+  HANDLE evt = nullptr;          // event-callback handle of a process-loopback stream (polled, never waited on)
+  DWORD target_pid = 0;          // process tree being captured (process mode)
+  bool process_mode = false;
+  bool api_failed = false;       // process loopback could not be opened: stay on the system mix until the app changes
 
   bool IsOpen() const { return cap != nullptr; }
 
@@ -203,6 +253,9 @@ struct Capture {
     cap.Reset();
     client.Reset();
     dev_id.clear();
+    if (evt) { CloseHandle(evt); evt = nullptr; }
+    target_pid = 0;
+    process_mode = false;
   }
 
   static bool DefaultDeviceId(std::wstring* id, ComPtr<IMMDevice>* dev_out) {
@@ -220,7 +273,7 @@ struct Capture {
     return true;
   }
 
-  bool Open(Analyzer& an) {
+  bool OpenSystem(Analyzer& an) {
     Close();
     ComPtr<IMMDevice> dev;
     std::wstring id;
@@ -260,6 +313,95 @@ struct Capture {
     checked_at = GetTickCount64();
     an.Reset(rate);
     return true;
+  }
+
+  // Captures only the process tree rooted at `pid`. The virtual process-loopback device has no mix format, so the
+  // format is fixed here: 16-bit PCM, stereo, 44.1 kHz (what Windows' own ApplicationLoopback sample uses).
+  bool OpenProcessLoopback(Analyzer& an, DWORD pid) {
+    Close();
+    AUDIOCLIENT_ACTIVATION_PARAMS params{};
+    params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+    params.ProcessLoopbackParams.TargetProcessId = pid;
+    params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+    PROPVARIANT pv{};
+    pv.vt = VT_BLOB;
+    pv.blob.cbSize = sizeof(params);
+    pv.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
+
+    auto handler = Microsoft::WRL::Make<ActivationHandler>();
+    if (!handler || !handler->done) return false;
+    ComPtr<IActivateAudioInterfaceAsyncOperation> op;
+    if (FAILED(ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient), &pv,
+                                           handler.Get(), op.GetAddressOf())))
+      return false;
+    if (WaitForSingleObject(handler->done, 3000) != WAIT_OBJECT_0) return false;
+    HRESULT activated = E_FAIL;
+    ComPtr<IUnknown> unk;
+    if (FAILED(op->GetActivateResult(&activated, unk.GetAddressOf())) || FAILED(activated) || !unk) return false;
+    if (FAILED(unk.As(&client))) { Close(); return false; }
+
+    WAVEFORMATEX wf{};
+    wf.wFormatTag = WAVE_FORMAT_PCM;
+    wf.nChannels = 2;
+    wf.nSamplesPerSec = 44100;
+    wf.wBitsPerSample = 16;
+    wf.nBlockAlign = static_cast<WORD>(wf.nChannels * wf.wBitsPerSample / 8);
+    wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
+    if (FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                  AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+                                      AUDCLNT_STREAMFLAGS_NOPERSIST,
+                                  200000 /* 20 ms */, 0, &wf, nullptr))) {
+      Close();
+      return false;
+    }
+    evt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!evt || FAILED(client->SetEventHandle(evt))) { Close(); return false; }
+    if (FAILED(client->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(cap.GetAddressOf())))) {
+      Close();
+      return false;
+    }
+    if (FAILED(client->Start())) { Close(); return false; }
+
+    is_float = false;
+    channels = 2;
+    bits = 16;
+    process_mode = true;
+    target_pid = pid;
+    checked_at = GetTickCount64();
+    an.Reset(static_cast<float>(wf.nSamplesPerSec));
+    return true;
+  }
+
+  // `app` = the media session's app id; empty = the whole system mix. With an app: capture just that app. When
+  // the app id cannot be matched to a running process (some players report an opaque id) or Windows cannot do
+  // per-process capture, the system mix is used instead, so the visualizer still moves; NeedsReopen() switches
+  // to the app-only capture as soon as that becomes possible.
+  bool Open(Analyzer& an, const std::wstring& app) {
+    Close();
+    if (!app.empty() && !api_failed) {
+      const DWORD pid = static_cast<DWORD>(FindAppRootPid(app));
+      if (pid != 0) {
+        if (OpenProcessLoopback(an, pid)) return true;
+        api_failed = true;
+      }
+    }
+    return OpenSystem(an);
+  }
+
+  // Time to re-open? (checked every few seconds only) Process mode: the app's process tree changed or went away.
+  // System mode: the default device changed, or an app is selected and now can be captured on its own.
+  bool NeedsReopen(const std::wstring& app) {
+    const ULONGLONG now = GetTickCount64();
+    if (now - checked_at < kDeviceCheckMs) return false;
+    if (process_mode) {
+      checked_at = now;
+      return app.empty() || static_cast<DWORD>(FindAppRootPid(app)) != target_pid;
+    }
+    if (!app.empty() && !api_failed) {
+      checked_at = now;
+      if (FindAppRootPid(app) != 0) return true;
+    }
+    return DeviceChanged();
   }
 
   // The default playback device changed (headphones plugged in, ...): the loopback stream stays on the old one.
@@ -317,6 +459,13 @@ struct AudioSpectrum::Impl {
   std::atomic<float> bands[kBands];
   HANDLE wake = nullptr;      // auto-reset: SetActive / shutdown / retry sleeps
   std::thread worker;
+  std::mutex target_mtx;
+  std::wstring target;        // app id to follow; empty = the whole system mix
+
+  std::wstring Target() {
+    std::lock_guard<std::mutex> lk(target_mtx);
+    return target;
+  }
 
   Impl() {
     for (auto& b : bands) b.store(0.0f, std::memory_order_relaxed);
@@ -338,6 +487,7 @@ struct AudioSpectrum::Impl {
     {
       Analyzer an;
       Capture cap;
+      std::wstring cap_app;       // the target `cap` was opened for
       LARGE_INTEGER freq{}, last{};
       QueryPerformanceFrequency(&freq);
 
@@ -349,8 +499,14 @@ struct AudioSpectrum::Impl {
           WaitForSingleObject(wake, INFINITE);
           continue;
         }
+        const std::wstring app = Target();
+        if (app != cap_app) {       // another app is selected (or the setting was toggled): start over
+          cap.Close();
+          cap.api_failed = false;
+          cap_app = app;
+        }
         if (!cap.IsOpen()) {
-          if (!cap.Open(an)) {
+          if (!cap.Open(an, app)) {
             ZeroBands();
             SetState(State::Unavailable);
             WaitForSingleObject(wake, kRetryMs);
@@ -380,7 +536,7 @@ struct AudioSpectrum::Impl {
           for (int i = 0; i < kBands; ++i) bands[i].store(lv[i], std::memory_order_relaxed);
           SetState(State::Live);
         }
-        if (cap.DeviceChanged()) cap.Close();
+        if (cap.NeedsReopen(app)) cap.Close();
       }
       cap.Close();
     }
@@ -390,6 +546,16 @@ struct AudioSpectrum::Impl {
 
 AudioSpectrum::AudioSpectrum() : impl_(std::make_unique<Impl>()) {}
 AudioSpectrum::~AudioSpectrum() = default;
+
+void AudioSpectrum::SetTargetApp(const std::wstring& app) {
+  Impl& d = *impl_;
+  {
+    std::lock_guard<std::mutex> lk(d.target_mtx);
+    if (d.target == app) return;
+    d.target = app;
+  }
+  if (d.wake) SetEvent(d.wake);
+}
 
 void AudioSpectrum::SetActive(bool on) {
   Impl& d = *impl_;
