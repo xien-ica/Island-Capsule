@@ -35,6 +35,10 @@ public:
   // system mix is used instead.
   void SetTargetApp(const std::wstring& app);
 
+  // UI thread. True once per change of what the capture is doing ("capturing only process 1234 ...", or why a
+  // per-app capture failed), with a short line for the app's log.
+  bool TakeDiagnostic(std::wstring* line);
+
   State GetState() const;
   // Latest levels, 0..1 (any thread). Zeros while idle.
   void GetBands(float (&out)[kBands]) const;

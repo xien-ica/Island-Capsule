@@ -6,7 +6,7 @@ All notable changes to Island Capsule are listed here. The format follows [Keep 
 
 ### Changed
 - Scrolling over the capsule now changes only the volume of the app that owns the current media (its entry in Windows' Volume Mixer) instead of the system volume. The app is matched to its audio session by the media session's app id; if it has not played any sound yet, nothing changes. Turn off *Settings > Volume > Only the playing app* (`volume_app_only=false` in `settings.ini`) to get the old system-wide behaviour back.
-- The visualizer now reacts only to the audio of the app that owns the current media, not to everything the PC plays (per-process loopback capture, Windows 11 / Windows 10 build 20348+; older systems keep using the system mix). If the player's app id cannot be matched to a running process the system mix is used as well. Turn off *Settings > Visualizer > Only the playing app* (`visualizer_app_only=false`) for the old behaviour.
+- The visualizer now reacts only to the audio of the app that owns the current media, not to everything the PC plays (per-process loopback capture, Windows 11 / Windows 10 build 20348+; older systems keep using the system mix). If the player's app id cannot be matched to a running process the system mix is used as well. If per-app capture fails on a supported Windows, the system mix is NOT used (other apps would move the bars); the reason is written to the log as `[visualizer] ...`. Turn off *Settings > Visualizer > Only the playing app* (`visualizer_app_only=false`) for the old behaviour.
 
 ## [1.0.2] - 2026-10-17
 

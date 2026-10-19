@@ -44,6 +44,7 @@ typedef struct {
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -216,6 +217,20 @@ struct Analyzer {
   }
 };
 
+// Per-process loopback exists from Windows 10 build 20348 (Windows 11 / Server 2022) on.
+bool ProcessLoopbackSupported() {
+  static const bool ok = [] {
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    auto fn = nt ? reinterpret_cast<RtlGetVersionFn>(GetProcAddress(nt, "RtlGetVersion")) : nullptr;
+    OSVERSIONINFOW vi{};
+    vi.dwOSVersionInfoSize = sizeof(vi);
+    if (!fn || fn(&vi) != 0) return true;   // cannot tell: try it
+    return vi.dwBuildNumber >= 20348;
+  }();
+  return ok;
+}
+
 // Completion handler for ActivateAudioInterfaceAsync. It must be agile (FtmBase), the callback arrives on a
 // system thread; the capture thread just waits on `done`.
 class ActivationHandler
@@ -244,7 +259,7 @@ struct Capture {
   HANDLE evt = nullptr;          // event-callback handle of a process-loopback stream (polled, never waited on)
   DWORD target_pid = 0;          // process tree being captured (process mode)
   bool process_mode = false;
-  bool api_failed = false;       // process loopback could not be opened: stay on the system mix until the app changes
+  std::wstring note;             // what the last Open() did / why it failed (shown in the app's log)
 
   bool IsOpen() const { return cap != nullptr; }
 
@@ -315,10 +330,9 @@ struct Capture {
     return true;
   }
 
-  // Captures only the process tree rooted at `pid`. The virtual process-loopback device has no mix format, so the
-  // format is fixed here: 16-bit PCM, stereo, 44.1 kHz (what Windows' own ApplicationLoopback sample uses).
-  bool OpenProcessLoopback(Analyzer& an, DWORD pid) {
-    Close();
+  // Activates the virtual process-loopback device for `pid`; on success `client` is an UNINITIALISED IAudioClient.
+  HRESULT ActivateProcessClient(DWORD pid) {
+    client.Reset();
     AUDIOCLIENT_ACTIVATION_PARAMS params{};
     params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
     params.ProcessLoopbackParams.TargetProcessId = pid;
@@ -329,63 +343,113 @@ struct Capture {
     pv.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
 
     auto handler = Microsoft::WRL::Make<ActivationHandler>();
-    if (!handler || !handler->done) return false;
+    if (!handler || !handler->done) return E_OUTOFMEMORY;
     ComPtr<IActivateAudioInterfaceAsyncOperation> op;
-    if (FAILED(ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient), &pv,
-                                           handler.Get(), op.GetAddressOf())))
-      return false;
-    if (WaitForSingleObject(handler->done, 3000) != WAIT_OBJECT_0) return false;
+    HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient), &pv,
+                                             handler.Get(), op.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    if (WaitForSingleObject(handler->done, 3000) != WAIT_OBJECT_0) return HRESULT_FROM_WIN32(WAIT_TIMEOUT);
     HRESULT activated = E_FAIL;
     ComPtr<IUnknown> unk;
-    if (FAILED(op->GetActivateResult(&activated, unk.GetAddressOf())) || FAILED(activated) || !unk) return false;
-    if (FAILED(unk.As(&client))) { Close(); return false; }
-
-    WAVEFORMATEX wf{};
-    wf.wFormatTag = WAVE_FORMAT_PCM;
-    wf.nChannels = 2;
-    wf.nSamplesPerSec = 44100;
-    wf.wBitsPerSample = 16;
-    wf.nBlockAlign = static_cast<WORD>(wf.nChannels * wf.wBitsPerSample / 8);
-    wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-    if (FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                  AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
-                                      AUDCLNT_STREAMFLAGS_NOPERSIST,
-                                  200000 /* 20 ms */, 0, &wf, nullptr))) {
-      Close();
-      return false;
-    }
-    evt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!evt || FAILED(client->SetEventHandle(evt))) { Close(); return false; }
-    if (FAILED(client->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(cap.GetAddressOf())))) {
-      Close();
-      return false;
-    }
-    if (FAILED(client->Start())) { Close(); return false; }
-
-    is_float = false;
-    channels = 2;
-    bits = 16;
-    process_mode = true;
-    target_pid = pid;
-    checked_at = GetTickCount64();
-    an.Reset(static_cast<float>(wf.nSamplesPerSec));
-    return true;
+    hr = op->GetActivateResult(&activated, unk.GetAddressOf());
+    if (FAILED(hr)) return hr;
+    if (FAILED(activated)) return activated;
+    if (!unk) return E_POINTER;
+    return unk.As(&client);
   }
 
-  // `app` = the media session's app id; empty = the whole system mix. With an app: capture just that app. When
-  // the app id cannot be matched to a running process (some players report an opaque id) or Windows cannot do
-  // per-process capture, the system mix is used instead, so the visualizer still moves; NeedsReopen() switches
-  // to the app-only capture as soon as that becomes possible.
+  // Captures only the process tree rooted at `pid`. The virtual device has no mix format, so one is chosen here.
+  // The first variant is what Windows' own ApplicationLoopback sample uses; the others are tried when the stream
+  // refuses it (each attempt needs a freshly activated client).
+  bool OpenProcessLoopback(Analyzer& an, DWORD pid) {
+    Close();
+    struct Variant {
+      bool use_float;
+      DWORD rate;
+      DWORD flags;
+      REFERENCE_TIME duration;
+    };
+    constexpr DWORD kBase = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST;
+    constexpr DWORD kConv = kBase | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    static constexpr Variant kVariants[] = {
+      { false, 44100, kBase, 200000 },
+      { false, 44100, kBase, 0 },
+      { false, 44100, kConv, 0 },
+      { true, 48000, kConv, 0 },
+    };
+
+    HRESULT hr = E_FAIL;
+    const wchar_t* stage = L"activate";
+    for (size_t i = 0; i < sizeof(kVariants) / sizeof(kVariants[0]); ++i) {
+      const Variant& v = kVariants[i];
+      stage = L"activate";
+      hr = ActivateProcessClient(pid);
+      if (FAILED(hr)) break;                 // bad process / not supported: another format will not help
+
+      WAVEFORMATEX wf{};
+      wf.wFormatTag = v.use_float ? WAVE_FORMAT_IEEE_FLOAT : WAVE_FORMAT_PCM;
+      wf.nChannels = 2;
+      wf.nSamplesPerSec = v.rate;
+      wf.wBitsPerSample = v.use_float ? 32 : 16;
+      wf.nBlockAlign = static_cast<WORD>(wf.nChannels * wf.wBitsPerSample / 8);
+      wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
+
+      stage = L"initialize";
+      hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, v.flags, v.duration, 0, &wf, nullptr);
+      if (FAILED(hr)) { Close(); continue; }
+      stage = L"event handle";
+      evt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      hr = evt ? client->SetEventHandle(evt) : HRESULT_FROM_WIN32(GetLastError());
+      if (FAILED(hr)) { Close(); continue; }
+      stage = L"capture service";
+      hr = client->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(cap.GetAddressOf()));
+      if (FAILED(hr)) { Close(); continue; }
+      stage = L"start";
+      hr = client->Start();
+      if (FAILED(hr)) { Close(); continue; }
+
+      is_float = v.use_float;
+      channels = 2;
+      bits = wf.wBitsPerSample;
+      process_mode = true;
+      target_pid = pid;
+      checked_at = GetTickCount64();
+      an.Reset(static_cast<float>(wf.nSamplesPerSec));
+      note = L"capturing only process " + std::to_wstring(pid) + L" and its children (format " + std::to_wstring(i + 1) + L")";
+      return true;
+    }
+    Close();
+    wchar_t code[16] = {};
+    swprintf_s(code, L"0x%08X", static_cast<unsigned>(hr));
+    note = std::wstring(L"per-app capture of process ") + std::to_wstring(pid) + L" failed at \"" + stage +
+           L"\" (HRESULT " + code + L")";
+    return false;
+  }
+
+  // `app` = the media session's app id; empty = the whole system mix. With an app: capture just that app.
+  // The system mix stands in only when per-app capture cannot work at all (Windows before build 20348) or the
+  // app id matches no running process (some players report an opaque id). When per-app capture is supported but
+  // failed, nothing is captured (the caller shows synthetic motion): falling back to the system mix would let
+  // other apps move the bars, which is exactly what this feature prevents.
   bool Open(Analyzer& an, const std::wstring& app) {
     Close();
-    if (!app.empty() && !api_failed) {
-      const DWORD pid = static_cast<DWORD>(FindAppRootPid(app));
-      if (pid != 0) {
-        if (OpenProcessLoopback(an, pid)) return true;
-        api_failed = true;
+    note.clear();
+    std::wstring why;
+    if (!app.empty()) {
+      if (ProcessLoopbackSupported()) {
+        const DWORD pid = static_cast<DWORD>(FindAppRootPid(app));
+        if (pid != 0) return OpenProcessLoopback(an, pid);
+        why = L"no running process matches \"" + app + L"\"";
+      } else {
+        why = L"this Windows version has no per-app capture (needs build 20348+)";
       }
     }
-    return OpenSystem(an);
+    if (OpenSystem(an)) {
+      note = why.empty() ? std::wstring(L"capturing all system audio") : L"capturing all system audio: " + why;
+      return true;
+    }
+    note = L"no playback device to capture";
+    return false;
   }
 
   // Time to re-open? (checked every few seconds only) Process mode: the app's process tree changed or went away.
@@ -397,7 +461,7 @@ struct Capture {
       checked_at = now;
       return app.empty() || static_cast<DWORD>(FindAppRootPid(app)) != target_pid;
     }
-    if (!app.empty() && !api_failed) {
+    if (!app.empty() && ProcessLoopbackSupported()) {
       checked_at = now;
       if (FindAppRootPid(app) != 0) return true;
     }
@@ -461,6 +525,19 @@ struct AudioSpectrum::Impl {
   std::thread worker;
   std::mutex target_mtx;
   std::wstring target;        // app id to follow; empty = the whole system mix
+  std::mutex diag_mtx;
+  std::wstring diag, diag_last;
+  std::atomic<bool> diag_ready{ false };
+
+  // One short line per change of what the capture is doing (or why it cannot), picked up by the UI for its log.
+  void PostNote(const std::wstring& n) {
+    if (n.empty()) return;
+    std::lock_guard<std::mutex> lk(diag_mtx);
+    if (n == diag_last) return;
+    diag_last = n;
+    diag = n;
+    diag_ready.store(true);
+  }
 
   std::wstring Target() {
     std::lock_guard<std::mutex> lk(target_mtx);
@@ -502,11 +579,12 @@ struct AudioSpectrum::Impl {
         const std::wstring app = Target();
         if (app != cap_app) {       // another app is selected (or the setting was toggled): start over
           cap.Close();
-          cap.api_failed = false;
           cap_app = app;
         }
         if (!cap.IsOpen()) {
-          if (!cap.Open(an, app)) {
+          const bool opened = cap.Open(an, app);
+          PostNote(cap.note);
+          if (!opened) {
             ZeroBands();
             SetState(State::Unavailable);
             WaitForSingleObject(wake, kRetryMs);
@@ -555,6 +633,15 @@ void AudioSpectrum::SetTargetApp(const std::wstring& app) {
     d.target = app;
   }
   if (d.wake) SetEvent(d.wake);
+}
+
+bool AudioSpectrum::TakeDiagnostic(std::wstring* line) {
+  Impl& d = *impl_;
+  if (!d.diag_ready.load()) return false;
+  std::lock_guard<std::mutex> lk(d.diag_mtx);
+  if (line) *line = d.diag;
+  d.diag_ready.store(false);
+  return true;
 }
 
 void AudioSpectrum::SetActive(bool on) {
