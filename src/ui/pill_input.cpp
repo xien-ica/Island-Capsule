@@ -242,7 +242,15 @@ void PillWindow::Impl::OnWheel(int delta, bool shift) {
   const float step = static_cast<float>((std::clamp)(cfg.scroll_step, 1, 10)) / 100.0f;
   float level = 0.0f;
   bool muted = false;
-  if (!sysvol.Nudge(static_cast<float>(notches) * step, &level, &muted)) {
+  const float vol_delta = static_cast<float>(notches) * step;
+  if (cfg.volume_app_only) {
+    // Only the app that owns the current media session; the system volume is not touched.
+    if (!media->has_session || !sysvol.NudgeApp(media->source_app, vol_delta, &level, &muted)) {
+      Logf(L"[volume] no audio session found for \"" + media->source_app +
+           L"\" (the app has to have played sound once); system volume left alone\r\n");
+      return;
+    }
+  } else if (!sysvol.Nudge(vol_delta, &level, &muted)) {
     Logf(L"[volume] could not reach the default playback device\r\n");
     return;
   }

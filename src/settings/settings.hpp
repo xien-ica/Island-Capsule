@@ -21,6 +21,7 @@ struct Settings {
   bool hide_fullscreen = true;       // fade the capsule out while a fullscreen app / game / video is up
   bool scroll_volume = true;         // mouse wheel over the capsule changes the system volume
   int scroll_step = 2;               // percent per wheel notch (1..10)
+  bool volume_app_only = true;       // the wheel changes only the playing app's volume (Volume Mixer entry), not the system's
   bool shift_scroll_skip = true;     // Shift + wheel over the capsule skips tracks (down = next, up = previous)
   bool click_actions = true;         // middle-click = play / pause, right-click = context menu
   bool strip_left = false;           // transport strip opens on the left of the main capsule (default: right)

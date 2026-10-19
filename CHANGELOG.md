@@ -2,6 +2,11 @@
 
 All notable changes to Island Capsule are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Scrolling over the capsule now changes only the volume of the app that owns the current media (its entry in Windows' Volume Mixer) instead of the system volume. The app is matched to its audio session by the media session's app id; if it has not played any sound yet, nothing changes. Turn off *Settings > Volume > Only the playing app* (`volume_app_only=false` in `settings.ini`) to get the old system-wide behaviour back.
+
 ## [1.0.2] - 2026-10-17
 
 ### Changed
