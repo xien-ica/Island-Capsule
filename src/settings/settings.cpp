@@ -130,6 +130,7 @@ Settings LoadSettings() {
   s.hide_fullscreen = ReadBool(p, L"hide_fullscreen", s.hide_fullscreen);
   s.scroll_volume = ReadBool(p, L"scroll_volume", s.scroll_volume);
   s.scroll_step = (std::clamp)(static_cast<int>(GetPrivateProfileIntW(L"capsule", L"scroll_step", s.scroll_step, p)), 1, 10);
+  s.volume_app_only = ReadBool(p, L"volume_app_only", s.volume_app_only);
   s.shift_scroll_skip = ReadBool(p, L"shift_scroll_skip", s.shift_scroll_skip);
   s.click_actions = ReadBool(p, L"click_actions", s.click_actions);
   s.strip_left = Lower(ReadString(p, L"strip_side", L"right")) == L"left";
@@ -172,9 +173,11 @@ bool EnsureSettingsFile() {
       "max_width=320\r\n"
       "; fade the capsule out while a fullscreen app, game or video is running\r\n"
       "hide_fullscreen=true\r\n"
-      "; mouse wheel over the capsule changes the system volume (percent per notch, 1..10)\r\n"
+      "; mouse wheel over the capsule changes the volume (percent per notch, 1..10)\r\n"
       "scroll_volume=true\r\n"
       "scroll_step=2\r\n"
+      "; true = the wheel only changes the volume of the app that is playing (its Volume Mixer entry); false = system volume\r\n"
+      "volume_app_only=true\r\n"
       "; Shift + wheel over the capsule skips tracks (wheel down = next, up = previous)\r\n"
       "shift_scroll_skip=true\r\n"
       "; middle-click = play / pause, right-click = menu (copy title, lyrics, settings, quit)\r\n"

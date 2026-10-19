@@ -15,7 +15,7 @@ It shows what’s currently playing, lets you control playback with hover or scr
 - **Now playing** — album art, title and artist, tinted by the album’s colors. Long titles scroll.
 - **Live visualizer** — reacts to the real audio coming from your speakers (or a simple animation if you prefer).
 - **Hover controls** — previous / play-pause / next slide out of the capsule.
-- **Scroll for volume** — mouse wheel over the capsule changes system volume.
+- **Scroll for volume** — mouse wheel over the capsule changes the volume of the app that is playing (or the system volume, if you turn that off in Settings).
 - **Synced lyrics** — `Ctrl+L` over the capsule switches to the current lyric line (sourced from [LRCLIB](https://lrclib.net)).
 - **Stays out of the way** — collapses when paused, hides when nothing is playing, and can hide during fullscreen apps/games.
 
@@ -33,7 +33,7 @@ If you move the program later, untick and re-tick **Start with Windows** so it r
 | Action over the capsule | Result |
 |---|---|
 | Hover | Previous / play-pause / next controls appear (above the capsule when lyrics are showing) |
-| Mouse wheel | System volume (a temporary volume bar replaces the title) |
+| Mouse wheel | Volume of the playing app, or the system volume with *Only the playing app* off (a temporary volume bar replaces the title) |
 | Shift + wheel | Skip tracks (down = next, up = previous) |
 | Middle-click | Play / pause |
 | Right-click | Menu: copy title + artist, lyrics mode, settings, quit |

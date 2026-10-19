@@ -9,15 +9,59 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
+#include <audiopolicy.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cwctype>
+#include <vector>
 
 #pragma comment(lib, "ole32.lib")
 
 namespace island {
 
 using Microsoft::WRL::ComPtr;
+
+namespace {
+
+std::wstring Lower(std::wstring s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+  return s;
+}
+
+// Process id -> lower-case executable name without the extension ("C:\...\Spotify.exe" -> "spotify").
+// Empty when the process cannot be opened (protected / already gone).
+std::wstring ExeStem(DWORD pid) {
+  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (!h) return {};
+  wchar_t buf[MAX_PATH] = {};
+  DWORD n = MAX_PATH;
+  std::wstring out;
+  if (QueryFullProcessImageNameW(h, 0, buf, &n)) {
+    std::wstring p(buf, n);
+    const size_t slash = p.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) p.erase(0, slash + 1);
+    const size_t dot = p.find_last_of(L'.');
+    if (dot != std::wstring::npos) p.erase(dot);
+    out = Lower(p);
+  }
+  CloseHandle(h);
+  return out;
+}
+
+// Does the media session's AppUserModelId belong to the process whose executable stem is `stem`?
+// AUMIDs come in several shapes ("Spotify.exe", "Chrome", "MSEdge",
+// "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"), so this is a loose, case-insensitive containment check in
+// either direction. Very short names are ignored so "a" cannot match everything.
+bool AppMatches(const std::wstring& app_lower, const std::wstring& stem) {
+  if (stem.size() < 3 || app_lower.empty()) return false;
+  if (app_lower.find(stem) != std::wstring::npos) return true;
+  std::wstring bare = app_lower;
+  if (bare.size() > 4 && bare.compare(bare.size() - 4, 4, L".exe") == 0) bare.erase(bare.size() - 4);
+  return bare.size() >= 3 && stem.find(bare) != std::wstring::npos;
+}
+
+} // namespace
 
 struct SystemVolume::Impl {
   bool com_inited = false;
@@ -29,19 +73,27 @@ struct SystemVolume::Impl {
     if (com_inited) CoUninitialize();
   }
 
-  bool Acquire() {
-    ep.Reset();
-    if (!com_inited) {
-      const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-      if (SUCCEEDED(hr)) com_inited = true;            // S_OK / S_FALSE: balance with CoUninitialize
-      else if (hr != RPC_E_CHANGED_MODE) return false; // already initialised differently: just use it
-    }
+  bool EnsureCom() {
+    if (com_inited) return true;
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (SUCCEEDED(hr)) com_inited = true;            // S_OK / S_FALSE: balance with CoUninitialize
+    else if (hr != RPC_E_CHANGED_MODE) return false; // already initialised differently: just use it
+    return true;
+  }
+
+  bool DefaultDevice(ComPtr<IMMDevice>& dev) {
+    if (!EnsureCom()) return false;
     ComPtr<IMMDeviceEnumerator> en;
     if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                 __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(en.GetAddressOf()))))
       return false;
+    return SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eMultimedia, dev.GetAddressOf()));
+  }
+
+  bool Acquire() {
+    ep.Reset();
     ComPtr<IMMDevice> dev;
-    if (FAILED(en->GetDefaultAudioEndpoint(eRender, eMultimedia, dev.GetAddressOf()))) return false;
+    if (!DefaultDevice(dev)) return false;
     if (FAILED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
                              reinterpret_cast<void**>(ep.GetAddressOf()))))
       return false;
@@ -76,6 +128,78 @@ bool SystemVolume::Nudge(float delta, float* level, bool* muted) {
 
   if (level) *level = next;
   if (muted) *muted = mute != FALSE;
+  return true;
+}
+
+bool SystemVolume::NudgeApp(const std::wstring& source_app, float delta, float* level, bool* muted) {
+  Impl& d = *impl_;
+  const std::wstring app = Lower(source_app);
+  if (app.empty()) return false;
+
+  // Audio sessions belong to the default playback device. They are enumerated afresh on every call (a wheel
+  // notch is rare enough), which also follows apps that start or stop playing and device changes.
+  ComPtr<IMMDevice> dev;
+  if (!d.DefaultDevice(dev)) return false;
+  ComPtr<IAudioSessionManager2> mgr;
+  if (FAILED(dev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                           reinterpret_cast<void**>(mgr.GetAddressOf()))))
+    return false;
+  ComPtr<IAudioSessionEnumerator> sessions;
+  if (FAILED(mgr->GetSessionEnumerator(sessions.GetAddressOf()))) return false;
+  int count = 0;
+  if (FAILED(sessions->GetCount(&count))) return false;
+
+  struct Hit {
+    ComPtr<ISimpleAudioVolume> vol;
+    bool active = false;
+  };
+  std::vector<Hit> hits;
+  for (int i = 0; i < count; ++i) {
+    ComPtr<IAudioSessionControl> ctl;
+    if (FAILED(sessions->GetSession(i, ctl.GetAddressOf())) || !ctl) continue;
+    ComPtr<IAudioSessionControl2> ctl2;
+    if (FAILED(ctl.As(&ctl2))) continue;
+    if (ctl2->IsSystemSoundsSession() == S_OK) continue;
+
+    AudioSessionState state = AudioSessionStateInactive;
+    ctl->GetState(&state);
+    if (state == AudioSessionStateExpired) continue;
+
+    DWORD pid = 0;
+    if (FAILED(ctl2->GetProcessId(&pid)) || pid == 0) continue;
+    if (!AppMatches(app, ExeStem(pid))) continue;
+
+    Hit h;
+    if (FAILED(ctl.As(&h.vol)) || !h.vol) continue;
+    h.active = (state == AudioSessionStateActive);
+    hits.push_back(std::move(h));
+  }
+  if (hits.empty()) return false;
+
+  // A browser has one session per audio-producing process: when some are actually playing, leave the idle ones
+  // (other tabs) alone so their old level cannot drag the new value around.
+  const bool any_active = std::any_of(hits.begin(), hits.end(), [](const Hit& h) { return h.active; });
+  if (any_active) hits.erase(std::remove_if(hits.begin(), hits.end(), [](const Hit& h) { return !h.active; }), hits.end());
+
+  float cur = 0.0f;
+  bool all_muted = true;
+  for (const Hit& h : hits) {
+    float v = 0.0f;
+    if (SUCCEEDED(h.vol->GetMasterVolume(&v))) cur = (std::max)(cur, v);
+    BOOL m = FALSE;
+    h.vol->GetMute(&m);
+    if (!m) all_muted = false;
+  }
+
+  const bool unmute = delta > 0.0f && all_muted;
+  const float next = (std::clamp)(cur + delta, 0.0f, 1.0f);
+  for (const Hit& h : hits) {
+    if (unmute) h.vol->SetMute(FALSE, nullptr);
+    h.vol->SetMasterVolume(next, nullptr);
+  }
+
+  if (level) *level = next;
+  if (muted) *muted = all_muted && !unmute;
   return true;
 }
 

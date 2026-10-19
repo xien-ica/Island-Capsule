@@ -363,6 +363,8 @@ struct Ui {
       volume.title = L"Volume";
       volume.rows.push_back(BoolRow(L"Scroll to change volume", L"Mouse wheel over the capsule",
                                     &Settings::scroll_volume, L"scroll_volume"));
+      volume.rows.push_back(BoolRow(L"Only the playing app", L"Leaves the system volume alone",
+                                    &Settings::volume_app_only, L"volume_app_only"));
       volume.rows.push_back(SliderRow(L"Step", L"Percent per wheel notch", 1, 10, 1, L"%",
                                       &Settings::scroll_step, L"scroll_step"));
       pages[1].push_back(std::move(volume));
